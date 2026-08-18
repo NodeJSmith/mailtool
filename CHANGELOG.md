@@ -4,7 +4,67 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.11.0] - 2026-07-07
+
+## [0.12.0] - 2026-08-18
+
+ Triage follow-up release: every fix below was found by running an agent-driven
+ 150-email inbox triage against the live MCP server, then verified with unit
+ tests plus live Outlook smoke tests.
+
+### Fixed
+
+- **`search_emails` LIKE filters actually work.** `Items.Restrict` uses Jet
+  syntax, which has no LIKE operator — every documented example such as
+  `"[Subject] LIKE '%project%'"` raised a COM error that was swallowed and
+  returned an empty list (indistinguishable from "no matches"). Filters
+  containing LIKE are now translated wholesale to DASL (`@SQL=`) with a
+  verified field map (Subject, SenderName, SenderEmailAddress, ReceivedTime,
+  Unread, HasAttachments, MessageClass, Body, To, CC, Importance), SQL LIKE
+  wildcard semantics, `[Unread]` literals inverted to `httpmail:read`
+  semantics, and remaining TRUE/FALSE normalized to 1/0. Bonus: the documented
+  `[HasAttachments] = TRUE` example also works now (it was rejected in Jet on
+  the tested Outlook build). Unknown fields in LIKE filters raise a clear
+  `ValueError` instead of matching nothing.
+- **Restrict failures are no longer silent.** `search_emails` raises
+  `RuntimeError` (surfaced by the MCP tool / CLI) when Outlook rejects a
+  filter. The CLI `search` and `calendar` commands print a JSON error and exit 1.
+- **`list_calendar_events` date windows were locale-broken.** Jet date
+  literals are parsed per the user's Windows locale: on a Dutch-locale system
+  `"09/01/2026 12:00"` silently parsed as 9 January, so windows whose end date
+  had a day component <= 12 returned empty (e.g. `days=14` and `days=45`
+  returned 0 events while `days=7`/`days=30` worked). The filter now uses
+  DASL `urn:schemas:calendar:dtstart/dtend` with ISO `YYYY-MM-DD HH:MM`
+  literals, which are locale-independent (verified: monotonic event counts
+  across 7/14/30/45/60-day windows).
+- **Calendar iteration order corrected.** The old code applied a second
+  `Restrict` AFTER setting `IncludeRecurrences`/`Sort`, which drops recurrence
+  expansion on the re-derived collection. Now: Sort → IncludeRecurrences → a
+  single combined Restrict (Microsoft-documented order).
+
+### Changed
+
+- **`list_calendar_events(all_events=True)` is now bounded** (from now through
+  +365 days, at most `CALENDAR_MAX_ITEMS = 2000` iterations). The previous
+  unbounded expansion of every recurring series blocked Outlook's
+  single-threaded COM apartment for minutes, which wedged the entire MCP
+  server — every other tool call (even `get_inbox_stats`) timed out until the
+  process was killed. `days` is clamped to [1, 365].
+- Python-level re-check in `list_calendar_events` uses overlap semantics
+  (matching the COM filter) instead of requiring the start to fall inside the
+  window, so multi-day events straddling the window edge are kept.
+
+### Added
+
+- `translate_filter` / `DASL_FIELD_MAP` / `DASL_MAIL_ONLY_FILTER` /
+  `CALENDAR_ALL_EVENTS_MAX_DAYS` / `CALENDAR_MAX_ITEMS` module constants and
+  helpers (unit-testable without Outlook).
+
+### Tests
+
+- New `tests/test_filters.py` (28 unit tests, no Outlook): DASL translation
+  (wildcards, field map, Unread inversion, boolean normalization, unknown
+  fields), search_emails filter composition + error surfacing, and calendar
+  single-Restrict / horizon / cap / overlap behaviour via fake COM items.
 
  triage-driven release. Every change below was motivated by stress-testing the MCP
 server against a 166-email inbox cleanup and is verified by unit tests plus a live

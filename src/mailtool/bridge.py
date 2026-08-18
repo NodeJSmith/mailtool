@@ -44,6 +44,101 @@ _SMTP_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # etc. Uses the same half-open MessageClass range trick as list_calendar_events().
 MAIL_ONLY_FILTER = "[MessageClass] >= 'IPM.Note' AND [MessageClass] < 'IPM.Note{'"
 
+# Mail-only scoping in DASL syntax: MessageClass is MAPI property 0x001A (string
+# flavour 0x001A001F). Verified against a live Exchange mailbox.
+DASL_MAIL_ONLY_FILTER = (
+    "(\"http://schemas.microsoft.com/mapi/proptag/0x001A001F\" >= 'IPM.Note' "
+    "AND \"http://schemas.microsoft.com/mapi/proptag/0x001A001F\" < 'IPM.Note{')"
+)
+
+# Jet [Field] name -> DASL schema reference. Only fields with a verified DASL
+# mapping are translated; anything else raises instead of silently matching
+# nothing (bare names like "Subject" are NOT resolvable in DASL).
+DASL_FIELD_MAP = {
+    "subject": '"urn:schemas:httpmail:subject"',
+    "sendername": '"urn:schemas:httpmail:sendername"',
+    "senderemailaddress": '"urn:schemas:httpmail:senderemail"',
+    "receivedtime": '"urn:schemas:httpmail:date"',
+    # NOTE: inverted semantics — httpmail:read = 0 means UNREAD.
+    "unread": '"urn:schemas:httpmail:read"',
+    "hasattachments": '"urn:schemas:httpmail:hasattachment"',
+    "messageclass": '"http://schemas.microsoft.com/mapi/proptag/0x001A001F"',
+    "body": '"urn:schemas:httpmail:textdescription"',
+    "to": '"urn:schemas:httpmail:to"',
+    "cc": '"urn:schemas:httpmail:cc"',
+    "importance": '"urn:schemas:httpmail:importance"',
+}
+
+# Maximum horizon (days) used when list_calendar_events(all_events=True) is
+# requested. A truly unbounded scan expands every recurring series forever
+# ("calendar bomb"), blocking Outlook's single-threaded COM apartment for
+# minutes — which wedges the entire MCP server, since every other COM call
+# queues behind it. all_events is therefore capped to a forward 1-year window.
+CALENDAR_ALL_EVENTS_MAX_DAYS = 365
+
+# Hard cap on the number of (expanded) occurrences list_calendar_events will
+# iterate. Belt-and-braces protection against pathological calendars.
+CALENDAR_MAX_ITEMS = 2000
+
+# Items.Restrict uses Jet syntax by default, which has no LIKE operator (and
+# this Outlook build also rejects the CI_* operators outright). LIKE is native
+# to DASL, so any filter containing a LIKE clause is translated wholesale to
+# DASL ("@SQL=" prefix): field references mapped via DASL_FIELD_MAP, boolean
+# literals normalized, and [Unread] comparison values inverted to match
+# httpmail:read semantics. Filters without LIKE pass through unchanged (pure
+# Jet), so existing behaviour is untouched.
+_JET_FIELD_RE = re.compile(r"\[\s*([A-Za-z][A-Za-z0-9_ ]*?)\s*\]")
+_JET_LIKE_RE = re.compile(
+    r"\[\s*[A-Za-z][A-Za-z0-9_ ]*?\s*\]\s+LIKE\s+'", re.IGNORECASE
+)
+_BOOL_CMP_RE = re.compile(r"(TRUE|FALSE)\b", re.IGNORECASE)
+_UNREAD_CMP_RE = re.compile(r'("urn:schemas:httpmail:read")\s*(=|<>)\s*(TRUE|FALSE)')
+
+
+def _jet_to_dasl(filter_query):
+    """Translate a Jet-style filter string to DASL ("@SQL=" prefixed)."""
+
+    def _field(match):
+        name = re.sub(r"\s+", "", match.group(1)).lower()
+        try:
+            return DASL_FIELD_MAP[name]
+        except KeyError:
+            supported = ", ".join(f"[{k.title()}]" for k in DASL_FIELD_MAP)
+            raise ValueError(
+                f"Cannot translate [Field] {match.group(1)!r} to DASL for LIKE "
+                f"filters. Supported fields: {supported}"
+            ) from None
+
+    dasl = _JET_FIELD_RE.sub(_field, filter_query)
+    # [Unread] mapped to httpmail:read has INVERTED semantics: flip the literal.
+    dasl = _UNREAD_CMP_RE.sub(
+        lambda m: f"{m.group(1)} {m.group(2)} {'0' if m.group(3).upper() == 'TRUE' else '1'}",
+        dasl,
+    )
+    # Remaining TRUE/FALSE literals (HasAttachments etc.) become 1/0, which
+    # DASL accepts for boolean properties.
+    dasl = _BOOL_CMP_RE.sub(
+        lambda m: "1" if m.group(1).upper() == "TRUE" else "0", dasl
+    )
+    return f"@SQL={dasl}"
+
+
+def translate_filter(filter_query):
+    """
+    Prepare a user filter for Items.Restrict.
+
+    Filters without a LIKE clause are returned unchanged (Jet syntax, the
+    historical path). Filters containing "LIKE 'pattern'" are translated to
+    DASL so the wildcard pattern actually works: '%x%' contains, 'x%' starts
+    with, '%x' ends with — SQL LIKE semantics, case-insensitive.
+
+    Raises ValueError when a LIKE filter references a field without a known
+    DASL mapping.
+    """
+    if _JET_LIKE_RE.search(filter_query):
+        return _jet_to_dasl(filter_query)
+    return filter_query
+
 
 class OutlookBridge:
     """Bridge to Outlook application via COM"""
@@ -724,13 +819,71 @@ class OutlookBridge:
                 continue
         return results
 
+    @staticmethod
+    def _to_naive_datetime(value):
+        """
+        Normalize a COM/pywintypes datetime (or a datetime-like with
+        capitalized components) to a naive Python datetime.
+
+        Returns None when the value cannot be normalized.
+        """
+        try:
+            if isinstance(value, datetime):
+                # drop tzinfo if present so we can compare with datetime.now()
+                return datetime(
+                    value.year,
+                    value.month,
+                    value.day,
+                    value.hour,
+                    value.minute,
+                    value.second,
+                )
+            return datetime(
+                value.Year,
+                value.Month,
+                value.Day,
+                value.Hour,
+                value.Minute,
+                value.Second,
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _calendar_range_filter(start_dt, end_dt):
+        """
+        Build the combined DASL filter for appointments overlapping
+        [start_dt, end_dt]: the MessageClass range (appointments only, so
+        meeting requests/responses cannot poison iteration) AND the date
+        window, applied in ONE Restrict call.
+
+        Dates use DASL with ISO literals ("YYYY-MM-DD HH:MM") because Jet
+        date literals are parsed according to the user's Windows locale: on a
+        Dutch-locale system "09/01/2026 12:00" silently parses as 9 January,
+        yielding mysteriously empty results for windows whose day component
+        is <= 12. DASL + ISO is locale-independent (verified live).
+        """
+        return (
+            '@SQL=("http://schemas.microsoft.com/mapi/proptag/0x001A001F" '
+            ">= 'IPM.Appointment' "
+            'AND "http://schemas.microsoft.com/mapi/proptag/0x001A001F" '
+            "< 'IPM.Appointment{') "
+            'AND ("urn:schemas:calendar:dtstart" <= '
+            f"'{end_dt.strftime('%Y-%m-%d %H:%M')}') "
+            'AND ("urn:schemas:calendar:dtend" >= '
+            f"'{start_dt.strftime('%Y-%m-%d %H:%M')}')"
+        )
+
     def list_calendar_events(self, days=7, all_events=False):
         """
         List calendar events for the next N days
 
         Args:
             days: Number of days ahead to look
-            all_events: If True, return all events without date filtering
+            all_events: If True, look ahead further than `days`: from now
+                through +CALENDAR_ALL_EVENTS_MAX_DAYS (365). A truly unbounded
+                scan would expand every recurring series forever and block
+                Outlook's COM apartment, wedging the server.
 
         Returns:
             List of event dictionaries
@@ -738,32 +891,32 @@ class OutlookBridge:
         calendar = self.get_calendar()
         items = calendar.Items
 
-        # CRITICAL: Filter to only appointment items before any other operations
-        # This prevents COM errors when encountering meeting requests/responses
-        items = items.Restrict(
-            "[MessageClass] >= 'IPM.Appointment' AND [MessageClass] < 'IPM.Appointment{'"
-        )
-
-        # CRITICAL: Enable recurrence expansion BEFORE sorting
-        # Must sort ascending for recurrence to work properly
+        # Canonical order per Microsoft docs: Sort -> IncludeRecurrences ->
+        # a single Restrict. The old code applied a second Restrict AFTER
+        # setting IncludeRecurrences, which drops recurrence expansion on the
+        # re-derived collection and yields flaky (often empty) results for
+        # some date windows.
+        items.Sort("[Start]")  # ascending, required for recurrence expansion
         items.IncludeRecurrences = True
-        items.Sort("[Start]")  # Ascending for recurrence
 
-        # CRITICAL FIX: Apply Restrict BEFORE iterating to avoid "Calendar Bomb"
-        # Without this, recurring meetings without end dates generate infinite items
-        if not all_events:
-            start_date = datetime.now()
-            end_date = start_date + timedelta(days=days)
-            # Jet SQL format for dates: MM/DD/YYYY HH:MM
-            # Use Restrict to filter at COM level before Python iteration
-            filter_str = (
-                f"[Start] <= '{end_date.strftime('%m/%d/%Y %H:%M')}' "
-                f"AND [End] >= '{start_date.strftime('%m/%d/%Y %H:%M')}'"
-            )
-            items = items.Restrict(filter_str)
+        start_dt = datetime.now()
+        if all_events:
+            end_dt = start_dt + timedelta(days=CALENDAR_ALL_EVENTS_MAX_DAYS)
+        else:
+            days = max(1, min(days, CALENDAR_ALL_EVENTS_MAX_DAYS))
+            end_dt = start_dt + timedelta(days=days)
+
+        # Single COM-level Restrict: appointments only + overlap window.
+        # This is also what prevents the "Calendar Bomb" (infinite recurring
+        # items) from ever reaching Python iteration.
+        items = items.Restrict(self._calendar_range_filter(start_dt, end_dt))
 
         events = []
+        scanned = 0
         for item in items:
+            scanned += 1
+            if scanned > CALENDAR_MAX_ITEMS:
+                break
             try:
                 # Use safe attribute access to handle COM errors
                 start = self._safe_get_attr(item, "Start")
@@ -773,38 +926,16 @@ class OutlookBridge:
                 if not start:
                     continue
 
-                # Additional Python-level filtering for safety (in case Restrict wasn't applied)
-                if not all_events:
-                    start_date = datetime.now()
-                    end_date = start_date + timedelta(days=days)
-                    # Normalize COM/pywintypes datetimes to naive Python datetimes for comparison
-                    start_dt = None
-                    try:
-                        if isinstance(start, datetime):
-                            # drop tzinfo if present to compare with datetime.now()
-                            start_dt = datetime(
-                                start.year,
-                                start.month,
-                                start.day,
-                                start.hour,
-                                start.minute,
-                                start.second,
-                            )
-                        else:
-                            start_dt = datetime(
-                                start.Year,
-                                start.Month,
-                                start.Day,
-                                start.Hour,
-                                start.Minute,
-                                start.Second,
-                            )
-                    except Exception:
-                        # If normalization fails, skip this item
-                        continue
-
-                    if not (start_dt >= start_date and start_dt <= end_date):
-                        continue
+                # Python-level overlap re-check (defence in depth; the COM
+                # filter above should already have scoped correctly).
+                start_n = self._to_naive_datetime(start)
+                end_n = self._to_naive_datetime(end)
+                if start_n is None:
+                    continue
+                if start_n > end_dt:
+                    continue
+                if end_n is not None and end_n < start_dt:
+                    continue
 
                 # Get attendees (safe access)
                 required_attendees = self._safe_get_attr(item, "RequiredAttendees", "")
@@ -1587,54 +1718,95 @@ class OutlookBridge:
         By default only real emails (MessageClass IPM.Note and subtypes) are
         returned; pass include_non_mail=True to also match meeting items etc.
 
+        SQL-style LIKE patterns are accepted and translated automatically:
+        Items.Restrict's default Jet syntax has no LIKE, so any filter with a
+        LIKE clause is rewritten to DASL ("[Subject] LIKE '%meeting%'" runs as
+        an @SQL= query with SQL LIKE wildcard semantics, case-insensitive).
+
+        NOTE on dates in plain (non-LIKE) filters: Jet date literals are
+        parsed according to the user's Windows locale — on e.g. a Dutch
+        locale, '07/01/2026' means 7 January. Prefer unambiguous literals for
+        your locale (e.g. '2026-07-01 00:00' or '01-07-2026' on NL locales)
+        when filtering by ReceivedTime.
+
         Args:
-            filter_query: SQL query string for filtering (e.g. "[Unread] = TRUE",
-                "[Subject] LIKE '%meeting%'", or a date range such as
-                "[ReceivedTime] >= '07/01/2026 00:00' AND [ReceivedTime] <= '07/31/2026 23:59'")
+            filter_query: Filter query string for filtering (e.g. "[Unread] = TRUE",
+                "[Subject] LIKE '%meeting%'", or a date range — see the locale
+                note above)
             limit: Max results to return
             include_non_mail: If True, do not scope the filter to IPM.Note items
 
         Returns:
             List of email dictionaries
+
+        Raises:
+            ValueError: If a LIKE filter references a field without a known
+                DASL mapping (supported: the fields in DASL_FIELD_MAP).
+            RuntimeError: If Outlook rejects the filter (invalid syntax) or the
+                COM call fails. Callers previously saw a silent empty list here,
+                which made bad filters indistinguishable from "no matches".
         """
-        try:
-            # Use get_inbox() directly to ensure correct account
-            folder = self.get_inbox()
+        # Use get_inbox() directly to ensure correct account
+        folder = self.get_inbox()
 
-            items = folder.Items
-            # Compose the effective filter. Unless the caller opts out of the
-            # mail-only scope (or already mentioned MessageClass themselves),
-            # AND in the IPM.Note range so meeting/post items are excluded.
-            effective_filter = filter_query
-            if filter_query:
-                if not include_non_mail and "messageclass" not in filter_query.lower():
-                    effective_filter = f"({filter_query}) AND {MAIL_ONLY_FILTER}"
-            elif not include_non_mail:
-                effective_filter = MAIL_ONLY_FILTER
+        # Translate SQL-style LIKE filters to DASL so wildcards actually work.
+        raw_query = filter_query or ""
+        mentions_message_class = "messageclass" in raw_query.lower()
+        prepared = translate_filter(raw_query)
+        dasl_mode = prepared.startswith("@SQL=")
 
-            # Apply restriction filter
-            items = items.Restrict(effective_filter)
+        items = folder.Items
+        # Compose the effective filter. Unless the caller opts out of the
+        # mail-only scope (or already mentioned MessageClass themselves),
+        # AND in the IPM.Note range so meeting/post items are excluded.
+        # DASL needs the "@SQL=" prefix at the very start of the whole string.
+        scope = DASL_MAIL_ONLY_FILTER if dasl_mode else MAIL_ONLY_FILTER
+        scope_needed = (
+            bool(prepared) and not include_non_mail and (not mentions_message_class)
+        )
+        if prepared and scope_needed:
+            if dasl_mode:
+                effective_filter = f"@SQL=({prepared[len('@SQL=') :]}) AND {scope}"
+            else:
+                effective_filter = f"({prepared}) AND {scope}"
+        elif prepared:
+            effective_filter = prepared
+        elif not include_non_mail:
+            effective_filter = scope
+        else:
+            effective_filter = None
 
-            # Sort by received time, most recent first
-            items.Sort("[ReceivedTime]", True)
+        if effective_filter:
+            try:
+                # Apply restriction filter
+                items = items.Restrict(effective_filter)
+            except Exception as e:
+                msg = (
+                    f"Outlook Restrict failed (filter={effective_filter!r}): {e}. "
+                    "Note: Jet syntax is the default; LIKE filters are "
+                    "translated to DASL automatically, other SQL-isms "
+                    "(IN/GLOB/underscore wildcards) are not."
+                )
+                print(f"Error searching emails: {msg}", file=sys.stderr)
+                raise RuntimeError(msg) from e
 
-            emails = []
-            count = 0
-            for item in items:
-                if count >= limit:
-                    break
+        # Sort by received time, most recent first
+        items.Sort("[ReceivedTime]", True)
 
-                try:
-                    emails.append(self._mail_item_to_dict(item, include_body=False))
-                    count += 1
-                except Exception:
-                    # Skip items that can't be accessed
-                    continue
+        emails = []
+        count = 0
+        for item in items:
+            if count >= limit:
+                break
 
-            return emails
-        except Exception as e:
-            print(f"Error searching emails: {e}", file=sys.stderr)
-            return []
+            try:
+                emails.append(self._mail_item_to_dict(item, include_body=False))
+                count += 1
+            except Exception:
+                # Skip items that can't be accessed
+                continue
+
+        return emails
 
     def search_by_sender(
         self, sender_email, limit=100, folder="Inbox", include_non_mail=False

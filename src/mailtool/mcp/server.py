@@ -527,6 +527,12 @@ def search_emails(
     Searches emails in the Inbox using Outlook Restriction filter (O(1) search).
     Supports SQL-like filter syntax for advanced queries.
 
+    SQL-style LIKE patterns are translated automatically to a DASL (@SQL=)
+    query, because Items.Restrict's default Jet syntax has no LIKE. Wildcard
+    semantics are SQL LIKE (case-insensitive): '%x%' contains, 'x%' starts
+    with, '%x' ends with. Invalid filters raise a tool error instead of
+    silently returning [].
+
     By default the search is scoped to real emails (MessageClass IPM.Note); set
     include_non_mail=True to also match meeting items and other non-mail items.
 
@@ -649,7 +655,9 @@ def list_calendar_events(
 
     Args:
         days: Number of days ahead to look (default: 7)
-        all_events: If True, return all events without date filtering (default: False)
+        all_events: If True, scan from now through +365 days instead of `days`.
+            Unbounded scans (the old behaviour) can expand recurring series
+            forever and wedge Outlook's COM apartment, so the horizon is capped.
 
     Returns:
         list[AppointmentSummary]: List of appointment summaries with basic information
