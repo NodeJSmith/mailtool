@@ -99,6 +99,14 @@ _JET_FIELD_RE = re.compile(r"\[\s*([A-Za-z][A-Za-z0-9_ ]*?)\s*\]")
 _JET_LIKE_RE = re.compile(
     r"\[\s*[A-Za-z][A-Za-z0-9_ ]*?\s*\]\s+LIKE\s+'", re.IGNORECASE
 )
+# Jet fields this Outlook build rejects outright even without a LIKE clause
+# — e.g. HasAttachments ("The property \"HasAttachments\" is unknown"),
+# verified against a live mailbox, unlike most Jet fields, which just work.
+# A filter referencing one of these must be routed through DASL translation
+# regardless of whether it also contains a LIKE clause. Add a field name
+# here (lowercase, matching DASL_FIELD_MAP's keys) if another one is found
+# to have the same quirk — no new regex needed.
+_JET_FORCE_DASL_FIELDS = frozenset({"hasattachments"})
 _BOOL_CMP_RE = re.compile(r"(TRUE|FALSE)\b", re.IGNORECASE)
 _UNREAD_CMP_RE = re.compile(r'("urn:schemas:httpmail:read")\s*(=|<>)\s*(TRUE|FALSE)')
 
@@ -160,16 +168,29 @@ def translate_filter(filter_query):
     """
     Prepare a user filter for Items.Restrict.
 
-    Filters without a LIKE clause are returned unchanged (Jet syntax, the
+    Filters without a LIKE clause, and without a reference to a field in
+    _JET_FORCE_DASL_FIELDS, are returned unchanged (Jet syntax, the
     historical path). Filters containing "LIKE 'pattern'" are translated to
     DASL so the wildcard pattern actually works: '%x%' contains, 'x%' starts
-    with, '%x' ends with — SQL LIKE semantics, case-insensitive.
+    with, '%x' ends with — SQL LIKE semantics, case-insensitive. A filter
+    referencing a _JET_FORCE_DASL_FIELDS field (e.g. [HasAttachments]) is
+    also routed through DASL translation even without a LIKE clause, since
+    Jet rejects that property outright on this Outlook build.
 
     Raises ValueError when a LIKE filter references a field without a known
     DASL mapping.
     """
     if _JET_LIKE_RE.search(filter_query):
         return _jet_to_dasl(filter_query)
+    # Mask quoted literals before scanning for forced fields, mirroring
+    # _jet_to_dasl's own masking — otherwise bracketed text inside a literal
+    # (e.g. [Body] = 'note: [HasAttachments] mentioned') would be mistaken
+    # for a real field reference and force an unnecessary DASL translation.
+    masked_query = _STRING_LITERAL_RE.sub("", filter_query)
+    for match in _JET_FIELD_RE.finditer(masked_query):
+        name = re.sub(r"\s+", "", match.group(1)).lower()
+        if name in _JET_FORCE_DASL_FIELDS:
+            return _jet_to_dasl(filter_query)
     return filter_query
 
 
