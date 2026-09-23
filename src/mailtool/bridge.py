@@ -593,6 +593,38 @@ class OutlookBridge:
 
         return None
 
+    def _resolve_folder(self, folder):
+        """
+        Resolve `folder` to a mail folder, warning to stderr and falling
+        back to Inbox when it can't be found.
+
+        "resolve folder by name, warn and fall back to Inbox if missing"
+        is needed by every caller that accepts a folder name (list_emails,
+        search_by_sender, get_inbox_stats) — centralized here so the
+        warning text and fallback behavior can't drift between them.
+
+        Args:
+            folder: Folder name (or "Inbox")
+
+        Returns:
+            (mail_folder, resolved_name) — resolved_name is "Inbox" when a
+            fallback occurred, not the originally requested name, so
+            callers that report the folder name back to the caller don't
+            attribute results to a folder that was never queried.
+        """
+        if folder == "Inbox":
+            return self.get_inbox(), "Inbox"
+
+        mail_folder = self.get_folder_by_name(folder)
+        if mail_folder:
+            return mail_folder, folder
+
+        print(
+            f"Warning: Folder '{folder}' not found, falling back to Inbox",
+            file=sys.stderr,
+        )
+        return self.get_inbox(), "Inbox"
+
     def get_item_by_id(self, entry_id):
         """
         Get any Outlook item by EntryID (O(1) direct access)
@@ -820,17 +852,7 @@ class OutlookBridge:
         Returns:
             List of email dictionaries
         """
-        # Use get_inbox() for the default Inbox to ensure correct account
-        if folder == "Inbox":
-            inbox = self.get_inbox()
-        else:
-            inbox = self.get_folder_by_name(folder)
-            if not inbox:
-                print(
-                    f"Warning: Folder '{folder}' not found, falling back to Inbox",
-                    file=sys.stderr,
-                )
-                inbox = self.get_inbox()
+        inbox, _ = self._resolve_folder(folder)
 
         if inbox is None:
             return []
@@ -1920,17 +1942,7 @@ class OutlookBridge:
             List of email dictionaries matching the sender
         """
         try:
-            # Get the folder
-            if folder == "Inbox":
-                mail_folder = self.get_inbox()
-            else:
-                mail_folder = self.get_folder_by_name(folder)
-                if not mail_folder:
-                    print(
-                        f"Warning: Folder '{folder}' not found, falling back to Inbox",
-                        file=sys.stderr,
-                    )
-                    mail_folder = self.get_inbox()
+            mail_folder, _ = self._resolve_folder(folder)
 
             items = mail_folder.Items
             # Filter to real emails unless the caller opts out.
@@ -1976,15 +1988,10 @@ class OutlookBridge:
             Dict with 'folder', 'total', and 'unread' integer counts
         """
         try:
-            if folder == "Inbox":
-                mail_folder = self.get_inbox()
-            else:
-                mail_folder = self.get_folder_by_name(folder)
-                if not mail_folder:
-                    mail_folder = self.get_inbox()
+            mail_folder, queried_folder = self._resolve_folder(folder)
 
             if mail_folder is None:
-                return {"folder": folder, "total": 0, "unread": 0}
+                return {"folder": queried_folder, "total": 0, "unread": 0}
 
             items = mail_folder.Items
             total = self._safe_get_attr(items, "Count", 0) or 0
@@ -1992,7 +1999,11 @@ class OutlookBridge:
                 unread = items.Restrict("[Unread] = TRUE").Count
             except Exception:
                 unread = 0
-            return {"folder": folder, "total": int(total), "unread": int(unread)}
+            return {
+                "folder": queried_folder,
+                "total": int(total),
+                "unread": int(unread),
+            }
         except Exception:
             return {"folder": folder, "total": 0, "unread": 0}
 

@@ -1,12 +1,13 @@
 """
 Unit tests for get_folder_by_name's subfolder recursion (_folder_by_path,
-_find_folder_by_name) and the not-found warning added to list_emails /
-search_by_sender.
+_find_folder_by_name) and the not-found warning added to every caller that
+resolves a folder by name (list_emails, search_by_sender, get_inbox_stats),
+via the shared _resolve_folder helper.
 
 get_folder_by_name previously only checked an account root's *direct*
 children, so a real subfolder (e.g. "Databricks Alerts" nested under
-"Inbox") could never be resolved by name — and its two callers silently
-fell back to Inbox instead of surfacing that the folder wasn't found.
+"Inbox") could never be resolved by name — and its callers silently fell
+back to Inbox instead of surfacing that the folder wasn't found.
 
 These tests are pure-Python (no Outlook / pywin32 required).
 """
@@ -166,7 +167,8 @@ class TestGetFolderByName:
 
 
 # =============================================================================
-# list_emails / search_by_sender: not-found warning instead of silent fallback
+# _resolve_folder (via list_emails / search_by_sender / get_inbox_stats):
+# not-found warning instead of silent fallback
 # =============================================================================
 
 
@@ -210,3 +212,43 @@ class TestFolderNotFoundWarning:
         captured = capsys.readouterr()
         assert "Nope" in captured.err
         assert "not found" in captured.err
+
+
+class FakeCountableItems(FakeItems):
+    """FakeItems with a .Count, for get_inbox_stats (which never iterates)."""
+
+    def __init__(self, count):
+        super().__init__()
+        self.Count = count
+
+    def Restrict(self, _filter_str):  # noqa: N802 - mirrors Outlook COM API
+        return self
+
+
+class TestGetInboxStatsNotFoundReporting:
+    def test_warns_and_reports_inbox_not_the_requested_name(self, capsys):
+        # get_inbox_stats previously fell back to Inbox silently AND kept
+        # reporting the *requested* folder name in the result — valid-looking
+        # counts attributed to a folder that was never queried.
+        bridge = OutlookBridge.__new__(OutlookBridge)
+        bridge.get_folder_by_name = lambda _name: None
+        inbox_folder = type("F", (), {"Items": FakeCountableItems(7)})()
+        bridge.get_inbox = lambda: inbox_folder
+
+        result = bridge.get_inbox_stats(folder="Nope")
+
+        assert result["folder"] == "Inbox"
+        assert result["total"] == 7
+        captured = capsys.readouterr()
+        assert "Nope" in captured.err
+        assert "not found" in captured.err
+
+    def test_resolved_folder_reports_its_own_name(self):
+        bridge = OutlookBridge.__new__(OutlookBridge)
+        target_folder = type("F", (), {"Items": FakeCountableItems(3)})()
+        bridge.get_folder_by_name = lambda _name: target_folder
+
+        result = bridge.get_inbox_stats(folder="Databricks Alerts")
+
+        assert result["folder"] == "Databricks Alerts"
+        assert result["total"] == 3
