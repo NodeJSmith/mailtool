@@ -100,6 +100,15 @@ class TestFindFolderByName:
             is quality_alerts
         )
 
+    def test_max_visited_bounds_a_wide_search(self):
+        # 10 direct children; target is the last one visited. A max_visited
+        # of 3 must give up before reaching it, even though max_depth (8)
+        # would otherwise allow the search to continue.
+        children = [FakeMailFolder(f"Child{i}") for i in range(10)]
+        root = FakeMailFolder("Root", children)
+        assert _find_folder_by_name(root, "Child9", 8, max_visited=3) is None
+        assert _find_folder_by_name(root, "Child9", 8, max_visited=20) is children[9]
+
 
 # =============================================================================
 # _folder_by_path
@@ -164,6 +173,14 @@ class TestGetFolderByName:
         bridge = make_bridge_with_root(inbox)
         assert bridge.get_folder_by_name("") is None
         assert bridge.get_folder_by_name(None) is None
+
+    def test_separators_only_path_returns_none(self):
+        # "\\" or "\\\\" pass the truthiness check but every segment is
+        # empty after filtering — must not raise IndexError on path_parts[0].
+        inbox, _, _, _ = make_tree()
+        bridge = make_bridge_with_root(inbox)
+        assert bridge.get_folder_by_name("\\") is None
+        assert bridge.get_folder_by_name("\\\\") is None
 
 
 # =============================================================================

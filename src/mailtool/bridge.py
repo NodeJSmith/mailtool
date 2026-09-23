@@ -24,6 +24,7 @@ import contextlib
 import re
 import sys
 import traceback
+from collections import deque
 from datetime import datetime, timedelta
 
 try:
@@ -178,6 +179,13 @@ def translate_filter(filter_query):
 # pathological cases.
 FOLDER_SEARCH_MAX_DEPTH = 8
 
+# Maximum total folders _find_folder_by_name will visit across the whole
+# search, independent of depth. A depth bound alone doesn't limit the work
+# for a wide tree — a mailbox with thousands of folders spread across a few
+# levels can still visit all of them, and each visit is a synchronous COM
+# call on the main thread. This caps the worst case regardless of shape.
+FOLDER_SEARCH_MAX_VISITED = 500
+
 
 def _folder_by_path(root, path_parts):
     """Walk a list of folder-name segments from `root` (e.g. ["Inbox",
@@ -204,24 +212,32 @@ def _folder_by_path(root, path_parts):
     return current
 
 
-def _find_folder_by_name(folder, target_name, max_depth):
+def _find_folder_by_name(folder, target_name, max_depth, max_visited=FOLDER_SEARCH_MAX_VISITED):
     """Breadth-first, case-insensitive search for `target_name` among the
-    descendants of `folder`, bounded to `max_depth` levels below it.
+    descendants of `folder`, bounded to `max_depth` levels below it and
+    `max_visited` folders visited in total.
 
     get_folder_by_name previously only checked an account root's *direct*
     children — a subfolder nested one level deeper (e.g. "Databricks
     Alerts" under "Inbox") could never be found by name alone, and callers
     silently fell back to Inbox instead. This walks the whole subtree.
+
+    The depth bound alone doesn't cap the amount of work for a wide tree —
+    a mailbox with many folders at one level would still visit all of them.
+    `max_visited` bounds the total regardless of shape, since each visit is
+    a synchronous COM call on the main thread.
     """
     target_lower = str(target_name).strip().lower()
-    frontier = [(folder, 0)]
-    while frontier:
-        current, depth = frontier.pop(0)
+    frontier = deque([(folder, 0)])
+    visited = 0
+    while frontier and visited < max_visited:
+        current, depth = frontier.popleft()
         try:
             children = list(current.Folders)
         except Exception:
             continue
         for child in children:
+            visited += 1
             try:
                 if str(child.Name).strip().lower() == target_lower:
                     return child
@@ -229,6 +245,8 @@ def _find_folder_by_name(folder, target_name, max_depth):
                 continue
             if depth + 1 < max_depth:
                 frontier.append((child, depth + 1))
+            if visited >= max_visited:
+                break
     return None
 
 
@@ -549,6 +567,10 @@ class OutlookBridge:
             return None
 
         path_parts = [p for p in str(folder_name).split("\\") if p]
+        if not path_parts:
+            # e.g. folder_name == "\\" or "\\\\" — passes the truthiness
+            # check above but every segment is empty after filtering.
+            return None
         if len(path_parts) > 1:
             root = self._get_root()
             if root:
@@ -574,7 +596,9 @@ class OutlookBridge:
 
         root = self._get_root()
         if root:
-            found = _find_folder_by_name(root, target_name, FOLDER_SEARCH_MAX_DEPTH)
+            found = _find_folder_by_name(
+                root, target_name, FOLDER_SEARCH_MAX_DEPTH, max_visited=FOLDER_SEARCH_MAX_VISITED
+            )
             if found:
                 return found
 
@@ -587,7 +611,9 @@ class OutlookBridge:
                 parent = self.namespace.Folders.Item(i)
             except Exception:
                 continue
-            found = _find_folder_by_name(parent, target_name, FOLDER_SEARCH_MAX_DEPTH)
+            found = _find_folder_by_name(
+                parent, target_name, FOLDER_SEARCH_MAX_DEPTH, max_visited=FOLDER_SEARCH_MAX_VISITED
+            )
             if found:
                 return found
 
