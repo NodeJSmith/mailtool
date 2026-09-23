@@ -20,11 +20,13 @@ from mailtool.mcp.lifespan import outlook_lifespan
 from mailtool.mcp.models import (
     AppointmentDetails,
     AppointmentSummary,
+    AttachmentInfo,
     CreateAppointmentResult,
     CreateTaskResult,
     EmailDetails,
     EmailSummary,
     FreeBusyInfo,
+    InboxStats,
     OperationResult,
     SendEmailResult,
     TaskSummary,
@@ -85,22 +87,82 @@ def _get_bridge():
     return _bridge
 
 
+def _email_summary_from_dict(email: dict) -> EmailSummary:
+    """Build an EmailSummary from a bridge result dict (defaults for missing keys)."""
+    return EmailSummary(
+        entry_id=email.get("entry_id", ""),
+        subject=email.get("subject", ""),
+        sender=email.get("sender", ""),
+        sender_name=email.get("sender_name", ""),
+        received_time=email.get("received_time"),
+        unread=email.get("unread", False),
+        has_attachments=email.get("has_attachments", False),
+        message_class=email.get("message_class", "IPM.Note"),
+        to=email.get("to", ""),
+        cc=email.get("cc", ""),
+        sent_time=email.get("sent_time"),
+        conversation_id=email.get("conversation_id"),
+        conversation_topic=email.get("conversation_topic"),
+    )
+
+
+def _email_details_from_dict(email: dict) -> EmailDetails:
+    """Build an EmailDetails from a bridge result dict (defaults for missing keys)."""
+    attachments = [
+        AttachmentInfo(
+            filename=a.get("filename", ""),
+            size=a.get("size", 0),
+            display_name=a.get("display_name", ""),
+            content_type=a.get("content_type"),
+            is_inline=a.get("is_inline", False),
+        )
+        for a in email.get("attachments", [])
+    ]
+    return EmailDetails(
+        entry_id=email.get("entry_id", ""),
+        subject=email.get("subject", ""),
+        sender=email.get("sender", ""),
+        sender_name=email.get("sender_name", ""),
+        body=email.get("body", ""),
+        html_body=email.get("html_body", ""),
+        received_time=email.get("received_time"),
+        has_attachments=email.get("has_attachments", False),
+        message_class=email.get("message_class", "IPM.Note"),
+        to=email.get("to", ""),
+        cc=email.get("cc", ""),
+        bcc=email.get("bcc", ""),
+        sent_time=email.get("sent_time"),
+        conversation_id=email.get("conversation_id"),
+        conversation_topic=email.get("conversation_topic"),
+        attachments=attachments,
+        body_top=email.get("body_top", ""),
+    )
+
+
 # ============================================================================
 # Email Tools (US-008: get_email, US-011: mark_email, US-013: delete_email, US-016: list_emails, US-017: send_email, US-018: reply_email, US-019: forward_email, US-020: move_email, US-021: search_emails)
 # ============================================================================
 
 
 @mcp.tool()
-def list_emails(limit: int = 10, folder: str = "Inbox") -> list[EmailSummary]:
+def list_emails(
+    limit: int = 10, folder: str = "Inbox", include_non_mail: bool = False
+) -> list[EmailSummary]:
     """
     List emails from the specified folder.
 
     Retrieves a list of email summaries from the specified folder, sorted by
     received time (most recent first). Uses O(1) direct access for each email.
 
+    By default only real emails (MessageClass IPM.Note) are returned; meeting
+    notifications, meeting cancellations, and other non-mail inbox items are
+    excluded. Set include_non_mail=True to include them.
+
     Args:
         limit: Maximum number of emails to return (default: 10)
         folder: Folder name to list emails from (default: "Inbox")
+        include_non_mail: If True, also return non-mail items (meeting
+            notifications, post items, etc.) — default False
 
     Returns:
         list[EmailSummary]: List of email summaries with basic information
@@ -108,25 +170,11 @@ def list_emails(limit: int = 10, folder: str = "Inbox") -> list[EmailSummary]:
     Raises:
         OutlookComError: If bridge is not initialized or folder cannot be accessed
     """
-    # Get bridge from module-level state
     bridge = _get_bridge()
-
-    # List emails from bridge
-    result = bridge.list_emails(limit=limit, folder=folder)
-
-    # Convert bridge result to list of EmailSummary models
-    return [
-        EmailSummary(
-            entry_id=email["entry_id"],
-            subject=email["subject"],
-            sender=email["sender"],
-            sender_name=email["sender_name"],
-            received_time=email["received_time"],
-            unread=email["unread"],
-            has_attachments=email["has_attachments"],
-        )
-        for email in result
-    ]
+    result = bridge.list_emails(
+        limit=limit, folder=folder, include_non_mail=include_non_mail
+    )
+    return [_email_summary_from_dict(email) for email in result]
 
 
 @mcp.tool()
@@ -137,6 +185,9 @@ def list_unread_emails(limit: int = 10) -> list[EmailSummary]:
     Retrieves the most recent unread emails from the Inbox, sorted by received
     time (most recent first). Uses Outlook Restrict filter for efficient querying
     (O(1) search at COM level).
+
+    Only real emails (MessageClass IPM.Note) are returned; unread meeting
+    notifications and other non-mail items are filtered out.
 
     Args:
         limit: Maximum number of unread emails to return (default: 10)
@@ -151,25 +202,9 @@ def list_unread_emails(limit: int = 10) -> list[EmailSummary]:
         This function uses the Outlook Restrict filter with '[Unread] = TRUE'
         for efficient querying at the COM level, avoiding unnecessary iteration.
     """
-    # Get bridge from module-level state
     bridge = _get_bridge()
-
-    # Search for unread emails via bridge using Restrict filter
     result = bridge.search_emails(filter_query="[Unread] = TRUE", limit=limit)
-
-    # Convert bridge result to list of EmailSummary models
-    return [
-        EmailSummary(
-            entry_id=email["entry_id"],
-            subject=email["subject"],
-            sender=email["sender"],
-            sender_name=email["sender_name"],
-            received_time=email["received_time"],
-            unread=email["unread"],
-            has_attachments=email["has_attachments"],
-        )
-        for email in result
-    ]
+    return [_email_summary_from_dict(email) for email in result]
 
 
 @mcp.tool()
@@ -178,7 +213,13 @@ def get_email(entry_id: str) -> EmailDetails:
     Get full email body and details by entry ID.
 
     Retrieves complete email information including body content (both plain text
-    and HTML) using O(1) direct access via EntryID.
+    and HTML), recipients, sent time, conversation/thread identifiers, and
+    attachment metadata, using O(1) direct access via EntryID.
+
+    Non-mail items (e.g. meeting notifications that share an Inbox EntryID) are
+    returned with their message_class set (e.g. "IPM.Schedule.Meeting.Request")
+    rather than raising, so callers can branch. OutlookNotFoundError is raised
+    only when no item at all matches the ID.
 
     Args:
         entry_id: Outlook EntryID of the email (O(1) direct access)
@@ -187,34 +228,40 @@ def get_email(entry_id: str) -> EmailDetails:
         EmailDetails: Complete email details including body content
 
     Raises:
-        OutlookNotFoundError: If email not found
+        OutlookNotFoundError: If no item matches the entry_id
         OutlookComError: If bridge is not initialized
     """
-    # Get bridge from module-level state
     bridge = _get_bridge()
-
-    # Get email body from bridge
     result = bridge.get_email_body(entry_id)
-
-    # Check if email was found
     if result is None:
         logger.error(f"Email not found: {entry_id}")
         raise OutlookNotFoundError("Email not found", entry_id=entry_id)
-
     logger.debug(f"Retrieved email: {entry_id}")
+    return _email_details_from_dict(result)
 
-    # Convert bridge result to EmailDetails model
-    # Note: EmailDetails doesn't have 'unread' field (bridge.get_email_body doesn't return it)
-    return EmailDetails(
-        entry_id=result["entry_id"],
-        subject=result["subject"],
-        sender=result["sender"],
-        sender_name=result["sender_name"],
-        body=result["body"],
-        html_body=result["html_body"],
-        received_time=result["received_time"],
-        has_attachments=result["has_attachments"],
-    )
+
+@mcp.tool()
+def get_emails(entry_ids: list[str], include_body: bool = True) -> list[EmailDetails]:
+    """
+    Fetch full details for many emails in a single call (bulk get_email).
+
+    Avoids the N+1 round-trip of calling get_email once per item. Items that
+    cannot be found are silently omitted from the result; the result order
+    follows the input order for items that were found.
+
+    Args:
+        entry_ids: List of Outlook EntryIDs (O(1) direct access each)
+        include_body: If False, return only summary fields (faster) — default True
+
+    Returns:
+        list[EmailDetails]: Details for each item that was found
+
+    Raises:
+        OutlookComError: If bridge is not initialized
+    """
+    bridge = _get_bridge()
+    result = bridge.get_email_bodies(entry_ids, include_body=include_body)
+    return [_email_details_from_dict(email) for email in result]
 
 
 @mcp.tool()
@@ -471,20 +518,32 @@ def move_email(entry_id: str, folder: str) -> OperationResult:
 
 
 @mcp.tool()
-def search_emails(filter_query: str, limit: int = 100) -> list[EmailSummary]:
+def search_emails(
+    filter_query: str, limit: int = 100, include_non_mail: bool = False
+) -> list[EmailSummary]:
     """
     Search emails using Outlook filter query.
 
     Searches emails in the Inbox using Outlook Restriction filter (O(1) search).
     Supports SQL-like filter syntax for advanced queries.
 
+    SQL-style LIKE patterns are translated automatically to a DASL (@SQL=)
+    query, because Items.Restrict's default Jet syntax has no LIKE. Wildcard
+    semantics are SQL LIKE (case-insensitive): '%x%' contains, 'x%' starts
+    with, '%x' ends with. Invalid filters raise a tool error instead of
+    silently returning [].
+
+    By default the search is scoped to real emails (MessageClass IPM.Note); set
+    include_non_mail=True to also match meeting items and other non-mail items.
+
     NOTE: For searching by sender email address, especially for internal/Exchange
     users, use search_emails_by_sender() instead. The SenderEmailAddress filter
     does not work for Exchange addresses (internal emails).
 
     Args:
-        filter_query: SQL-like filter query string (e.g., "[Subject] LIKE '%meeting%'")
+        filter_query: SQL-like filter query string (examples below)
         limit: Maximum number of results to return (default: 100)
+        include_non_mail: If True, do not scope to IPM.Note items — default False
 
     Returns:
         list[EmailSummary]: List of matching email summaries
@@ -495,32 +554,24 @@ def search_emails(filter_query: str, limit: int = 100) -> list[EmailSummary]:
     Examples:
         search_emails("[Subject] LIKE '%project%'")  # Search by subject
         search_emails("[Unread] = TRUE")  # Find unread emails
-        search_emails("[SenderName] LIKE '%John%'")  # Search by sender name (works better than email)
+        search_emails("[SenderName] LIKE '%John%'")  # By sender name (better than email)
+        search_emails("[ReceivedTime] >= '07/01/2026 00:00' AND "
+                      "[ReceivedTime] <= '07/31/2026 23:59'")  # Date range
+        search_emails("[HasAttachments] = TRUE")  # Only emails with attachments
     """
-    # Get bridge from module-level state
     bridge = _get_bridge()
-
-    # Search emails via bridge
-    result = bridge.search_emails(filter_query=filter_query, limit=limit)
-
-    # Convert bridge result to list of EmailSummary models
-    return [
-        EmailSummary(
-            entry_id=email["entry_id"],
-            subject=email["subject"],
-            sender=email["sender"],
-            sender_name=email["sender_name"],
-            received_time=email["received_time"],
-            unread=email["unread"],
-            has_attachments=email["has_attachments"],
-        )
-        for email in result
-    ]
+    result = bridge.search_emails(
+        filter_query=filter_query, limit=limit, include_non_mail=include_non_mail
+    )
+    return [_email_summary_from_dict(email) for email in result]
 
 
 @mcp.tool()
 def search_emails_by_sender(
-    sender_email: str, limit: int = 100, folder: str = "Inbox"
+    sender_email: str,
+    limit: int = 100,
+    folder: str = "Inbox",
+    include_non_mail: bool = False,
 ) -> list[EmailSummary]:
     """
     Search emails by sender email address (handles Exchange addresses).
@@ -537,6 +588,7 @@ def search_emails_by_sender(
         sender_email: Email address to search for (e.g., "f.muijzer@utwente.nl")
         limit: Maximum number of results to return (default: 100)
         folder: Folder name to search in (default: "Inbox")
+        include_non_mail: If True, also consider non-mail items — default False
 
     Returns:
         list[EmailSummary]: List of matching email summaries
@@ -548,25 +600,41 @@ def search_emails_by_sender(
         search_emails_by_sender("john@example.com")  # Search by sender
         search_emails_by_sender("f.muijzer@utwente.nl", limit=50)  # Internal Exchange user
     """
-    # Get bridge from module-level state
     bridge = _get_bridge()
+    result = bridge.search_by_sender(
+        sender_email=sender_email,
+        limit=limit,
+        folder=folder,
+        include_non_mail=include_non_mail,
+    )
+    return [_email_summary_from_dict(email) for email in result]
 
-    # Search emails by sender via bridge
-    result = bridge.search_by_sender(sender_email=sender_email, limit=limit, folder=folder)
 
-    # Convert bridge result to list of EmailSummary models
-    return [
-        EmailSummary(
-            entry_id=email["entry_id"],
-            subject=email["subject"],
-            sender=email["sender"],
-            sender_name=email["sender_name"],
-            received_time=email["received_time"],
-            unread=email["unread"],
-            has_attachments=email["has_attachments"],
-        )
-        for email in result
-    ]
+@mcp.tool()
+def get_inbox_stats(folder: str = "Inbox") -> InboxStats:
+    """
+    Return cheap total/unread counts for a folder without fetching items.
+
+    Uses Restrict+Count at the COM level so it is fast regardless of folder
+    size. Useful for deciding whether list_unread_emails(limit=N) has more
+    results to page through, or for inbox monitoring.
+
+    Args:
+        folder: Folder name (default: "Inbox")
+
+    Returns:
+        InboxStats: {folder, total, unread}
+
+    Raises:
+        OutlookComError: If bridge is not initialized
+    """
+    bridge = _get_bridge()
+    result = bridge.get_inbox_stats(folder=folder)
+    return InboxStats(
+        folder=result.get("folder", folder),
+        total=result.get("total", 0),
+        unread=result.get("unread", 0),
+    )
 
 
 # ============================================================================
@@ -587,7 +655,9 @@ def list_calendar_events(
 
     Args:
         days: Number of days ahead to look (default: 7)
-        all_events: If True, return all events without date filtering (default: False)
+        all_events: If True, scan from now through +365 days instead of `days`.
+            Unbounded scans (the old behaviour) can expand recurring series
+            forever and wedge Outlook's COM apartment, so the horizon is capped.
 
     Returns:
         list[AppointmentSummary]: List of appointment summaries with basic information

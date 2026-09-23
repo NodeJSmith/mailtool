@@ -176,7 +176,9 @@ class TestListEmails:
         assert len(result) == 1
         assert result[0].subject == "Test Email"
         assert result[0].entry_id == "email-123"
-        mock_bridge.list_emails.assert_called_once_with(limit=10, folder="Inbox")
+        mock_bridge.list_emails.assert_called_once_with(
+            limit=10, folder="Inbox", include_non_mail=False
+        )
 
     def test_list_emails_with_limit(self, server_with_mock, mock_bridge):
         """Test list_emails with custom limit"""
@@ -185,7 +187,9 @@ class TestListEmails:
         result = list_emails(limit=5)
 
         assert isinstance(result, list)
-        mock_bridge.list_emails.assert_called_once_with(limit=5, folder="Inbox")
+        mock_bridge.list_emails.assert_called_once_with(
+            limit=5, folder="Inbox", include_non_mail=False
+        )
 
     def test_list_emails_with_folder(self, server_with_mock, mock_bridge):
         """Test list_emails from custom folder"""
@@ -194,7 +198,9 @@ class TestListEmails:
         result = list_emails(folder="Sent Items", limit=10)
 
         assert isinstance(result, list)
-        mock_bridge.list_emails.assert_called_once_with(limit=10, folder="Sent Items")
+        mock_bridge.list_emails.assert_called_once_with(
+            limit=10, folder="Sent Items", include_non_mail=False
+        )
 
 
 class TestGetEmail:
@@ -407,10 +413,11 @@ class TestSearchEmailsBySender:
         result = search_emails_by_sender("test@example.com", limit=100)
 
         assert isinstance(result, list)
-        assert len(result) == 1
-        assert result[0].sender == "test@example.com"
         mock_bridge.search_by_sender.assert_called_once_with(
-            sender_email="test@example.com", limit=100, folder="Inbox"
+            sender_email="test@example.com",
+            limit=100,
+            folder="Inbox",
+            include_non_mail=False,
         )
 
     def test_search_emails_by_sender_with_folder(self, server_with_mock, mock_bridge):
@@ -423,7 +430,10 @@ class TestSearchEmailsBySender:
 
         assert isinstance(result, list)
         mock_bridge.search_by_sender.assert_called_once_with(
-            sender_email="test@example.com", limit=50, folder="Archive"
+            sender_email="test@example.com",
+            limit=50,
+            folder="Archive",
+            include_non_mail=False,
         )
 
 

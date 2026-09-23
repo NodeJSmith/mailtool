@@ -82,9 +82,14 @@ def _format_email_summary(email: EmailSummary) -> str:
     """
     return f"""Subject: {email.subject}
 From: {email.sender_name} <{email.sender}>
+To: {email.to or "(none)"}
+CC: {email.cc or "(none)"}
 Received: {email.received_time}
+Sent: {email.sent_time}
 Unread: {"Yes" if email.unread else "No"}
 Attachments: {"Yes" if email.has_attachments else "No"}
+MessageClass: {email.message_class}
+Conversation: {email.conversation_topic or "(none)"} [{email.conversation_id or "-"}]
 Entry ID: {email.entry_id}
 """
 
@@ -98,13 +103,32 @@ def _format_email_details(email: EmailDetails) -> str:
     Returns:
         Formatted text representation with body
     """
+    attachment_lines = (
+        "\n".join(
+            f"  - {a.filename} ({a.size} bytes{', inline' if a.is_inline else ''})"
+            for a in email.attachments
+        )
+        if email.attachments
+        else "  (none)"
+    )
     return f"""Subject: {email.subject}
 From: {email.sender_name} <{email.sender}>
+To: {email.to or "(none)"}
+CC: {email.cc or "(none)"}
 Received: {email.received_time}
+Sent: {email.sent_time}
 Attachments: {"Yes" if email.has_attachments else "No"}
+MessageClass: {email.message_class}
+Conversation: {email.conversation_topic or "(none)"} [{email.conversation_id or "-"}]
 Entry ID: {email.entry_id}
 
-Body:
+Attachments:
+{attachment_lines}
+
+Body (top message):
+{email.body_top}
+
+Body (full):
 {email.body}
 """
 
@@ -123,11 +147,15 @@ def _email_summary_to_dict(email: EmailSummary) -> dict:
         "subject": email.subject,
         "sender": email.sender,
         "sender_name": email.sender_name,
-        "received_time": email.received_time.isoformat()
-        if email.received_time
-        else None,
+        "received_time": email.received_time,
         "unread": email.unread,
         "has_attachments": email.has_attachments,
+        "message_class": email.message_class,
+        "to": email.to,
+        "cc": email.cc,
+        "sent_time": email.sent_time,
+        "conversation_id": email.conversation_id,
+        "conversation_topic": email.conversation_topic,
     }
 
 
@@ -147,10 +175,17 @@ def _email_details_to_dict(email: EmailDetails) -> dict:
         "sender_name": email.sender_name,
         "body": email.body,
         "html_body": email.html_body,
-        "received_time": email.received_time.isoformat()
-        if email.received_time
-        else None,
+        "body_top": email.body_top,
+        "received_time": email.received_time,
+        "sent_time": email.sent_time,
         "has_attachments": email.has_attachments,
+        "message_class": email.message_class,
+        "to": email.to,
+        "cc": email.cc,
+        "bcc": email.bcc,
+        "conversation_id": email.conversation_id,
+        "conversation_topic": email.conversation_topic,
+        "attachments": [a.model_dump() for a in email.attachments],
     }
 
 

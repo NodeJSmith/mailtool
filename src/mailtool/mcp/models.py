@@ -25,10 +25,43 @@ class EmailSummary(BaseModel):
     )
     unread: bool = Field(description="Whether the email is unread")
     has_attachments: bool = Field(description="Whether the email has attachments")
+    message_class: str = Field(
+        default="IPM.Note",
+        description="Outlook MessageClass (IPM.Note for mail; IPM.Schedule.Meeting.* for meeting items)",
+    )
+    to: str = Field(default="", description="Semicolon-separated To recipients")
+    cc: str = Field(default="", description="Semicolon-separated CC recipients")
+    sent_time: str | None = Field(
+        default=None,
+        description="Sent timestamp in 'YYYY-MM-DD HH:MM:SS' format or None",
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        description="Outlook ConversationID for thread grouping",
+    )
+    conversation_topic: str | None = Field(
+        default=None,
+        description="Conversation topic (normalized subject) for thread grouping",
+    )
+
+
+class AttachmentInfo(BaseModel):
+    """Metadata for a single email attachment (bytes not included)."""
+
+    filename: str = Field(default="", description="Attachment filename")
+    size: int = Field(default=0, description="Attachment size in bytes")
+    display_name: str = Field(default="", description="Outlook display name")
+    content_type: str | None = Field(
+        default=None, description="MIME content type if known"
+    )
+    is_inline: bool = Field(
+        default=False,
+        description="Whether the attachment is inline (e.g. embedded image)",
+    )
 
 
 class EmailDetails(BaseModel):
-    """Full email details including body content"""
+    """Full email details including body content."""
 
     entry_id: str = Field(description="Outlook EntryID for O(1) direct access")
     subject: str = Field(description="Email subject line")
@@ -41,6 +74,35 @@ class EmailDetails(BaseModel):
         description="Received timestamp in 'YYYY-MM-DD HH:MM:SS' format or None",
     )
     has_attachments: bool = Field(description="Whether the email has attachments")
+    message_class: str = Field(
+        default="IPM.Note",
+        description="Outlook MessageClass (IPM.Note for mail; IPM.Schedule.Meeting.* for meeting items)",
+    )
+    to: str = Field(default="", description="Semicolon-separated To recipients")
+    cc: str = Field(default="", description="Semicolon-separated CC recipients")
+    bcc: str = Field(
+        default="", description="Semicolon-separated BCC recipients (sent items only)"
+    )
+    sent_time: str | None = Field(
+        default=None,
+        description="Sent timestamp in 'YYYY-MM-DD HH:MM:SS' format or None",
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        description="Outlook ConversationID for thread grouping",
+    )
+    conversation_topic: str | None = Field(
+        default=None,
+        description="Conversation topic (normalized subject) for thread grouping",
+    )
+    attachments: list[AttachmentInfo] = Field(
+        default_factory=list,
+        description="Metadata for each attachment (filenames, sizes, types)",
+    )
+    body_top: str = Field(
+        default="",
+        description="Cleaned top message: the new content only, with quoted reply chains and signatures stripped",
+    )
 
 
 class SendEmailResult(BaseModel):
@@ -178,3 +240,16 @@ class OperationResult(BaseModel):
 
     success: bool = Field(description="Whether the operation succeeded")
     message: str = Field(description="Human-readable result message")
+
+
+# ============================================================================
+# Mailbox Statistics Models
+# ============================================================================
+
+
+class InboxStats(BaseModel):
+    """Folder statistics for cheap pagination/monitoring without fetching items."""
+
+    folder: str = Field(description="Folder name the stats were collected from")
+    total: int = Field(default=0, description="Total item count in the folder")
+    unread: int = Field(default=0, description="Unread item count in the folder")

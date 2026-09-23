@@ -363,7 +363,11 @@ def main() -> None:
         print(json.dumps(emails, indent=2))
 
     elif args.command == "calendar":
-        events = bridge.list_calendar_events(days=args.days, all_events=args.all)
+        try:
+            events = bridge.list_calendar_events(days=args.days, all_events=args.all)
+        except Exception as e:
+            print(json.dumps({"error": str(e)}), file=sys.stderr)
+            sys.exit(1)
         print(json.dumps(events, indent=2))
 
     elif args.command == "email":
@@ -434,7 +438,11 @@ def main() -> None:
             sys.exit(1)
 
     elif args.command == "search":
-        emails = bridge.search_emails(args.query, limit=args.limit)
+        try:
+            emails = bridge.search_emails(args.query, limit=args.limit)
+        except Exception as e:
+            print(json.dumps({"error": str(e)}), file=sys.stderr)
+            sys.exit(1)
         print(json.dumps(emails, indent=2))
 
     elif args.command == "folders":

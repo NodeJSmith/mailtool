@@ -191,6 +191,12 @@ class TestModelSerialization:
             "received_time": "2025-01-19 10:30:00",
             "unread": True,
             "has_attachments": False,
+            "message_class": "IPM.Note",
+            "to": "",
+            "cc": "",
+            "sent_time": None,
+            "conversation_id": None,
+            "conversation_topic": None,
         }
         email = EmailSummary(**data)
         # Test model_dump
@@ -212,6 +218,15 @@ class TestModelSerialization:
             "html_body": "<html><body>HTML body</body></html>",
             "received_time": "2025-01-19 10:30:00",
             "has_attachments": False,
+            "message_class": "IPM.Note",
+            "to": "",
+            "cc": "",
+            "bcc": "",
+            "sent_time": None,
+            "conversation_id": None,
+            "conversation_topic": None,
+            "attachments": [],
+            "body_top": "",
         }
         email = EmailDetails(**data)
         # Test model_dump

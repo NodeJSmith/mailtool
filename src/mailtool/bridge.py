@@ -21,11 +21,155 @@ Usage:
 # Modified to test pre-commit hook
 
 import contextlib
+import re
 import sys
 import traceback
 from datetime import datetime, timedelta
 
-import win32com.client
+try:
+    import win32com.client
+except ImportError:
+    # pywin32 is only required for live COM access. Allowing the module to import
+    # without it means the pure-Python helpers (e.g. _clean_body_top, _SMTP_REGEX,
+    # MAIL_ONLY_FILTER) can be unit-tested on any platform. Instantiating
+    # OutlookBridge still requires pywin32 + a running Outlook on Windows.
+    win32com = None
+
+# Regex used to salvage an SMTP address out of a raw Exchange DN or display string
+# when both GetExchangeUser() and the PropertyAccessor lookup fail.
+_SMTP_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+# Outlook Restrict filter that captures IPM.Note and its subtypes (e.g. IPM.Note.SMIME)
+# while excluding meeting notifications (IPM.Schedule.Meeting.*), post items, reports,
+# etc. Uses the same half-open MessageClass range trick as list_calendar_events().
+MAIL_ONLY_FILTER = "[MessageClass] >= 'IPM.Note' AND [MessageClass] < 'IPM.Note{'"
+
+# Mail-only scoping in DASL syntax: MessageClass is MAPI property 0x001A (string
+# flavour 0x001A001F). Verified against a live Exchange mailbox.
+DASL_MAIL_ONLY_FILTER = (
+    "(\"http://schemas.microsoft.com/mapi/proptag/0x001A001F\" >= 'IPM.Note' "
+    "AND \"http://schemas.microsoft.com/mapi/proptag/0x001A001F\" < 'IPM.Note{')"
+)
+
+# Jet [Field] name -> DASL schema reference. Only fields with a verified DASL
+# mapping are translated; anything else raises instead of silently matching
+# nothing (bare names like "Subject" are NOT resolvable in DASL).
+DASL_FIELD_MAP = {
+    "subject": '"urn:schemas:httpmail:subject"',
+    "sendername": '"urn:schemas:httpmail:sendername"',
+    # NOTE: mapped via MAPI proptag (PR_SENDER_EMAIL_ADDRESS, 0x0C1F), not
+    # urn:schemas:httpmail:senderemail. The httpmail property is unreliably
+    # populated on Exchange Online mailboxes — LIKE queries against it can
+    # silently match zero items even when [SenderEmailAddress] = '...'
+    # (plain Jet, same underlying MAPI property) finds the message. Verified
+    # against a live mailbox: same fix already applied to messageclass below
+    # for the same reason.
+    "senderemailaddress": '"http://schemas.microsoft.com/mapi/proptag/0x0C1F001F"',
+    "receivedtime": '"urn:schemas:httpmail:date"',
+    # NOTE: inverted semantics — httpmail:read = 0 means UNREAD.
+    "unread": '"urn:schemas:httpmail:read"',
+    "hasattachments": '"urn:schemas:httpmail:hasattachment"',
+    "messageclass": '"http://schemas.microsoft.com/mapi/proptag/0x001A001F"',
+    "body": '"urn:schemas:httpmail:textdescription"',
+    "to": '"urn:schemas:httpmail:to"',
+    "cc": '"urn:schemas:httpmail:cc"',
+    "importance": '"urn:schemas:httpmail:importance"',
+}
+
+# Maximum horizon (days) used when list_calendar_events(all_events=True) is
+# requested. A truly unbounded scan expands every recurring series forever
+# ("calendar bomb"), blocking Outlook's single-threaded COM apartment for
+# minutes — which wedges the entire MCP server, since every other COM call
+# queues behind it. all_events is therefore capped to a forward 1-year window.
+CALENDAR_ALL_EVENTS_MAX_DAYS = 365
+
+# Hard cap on the number of (expanded) occurrences list_calendar_events will
+# iterate. Belt-and-braces protection against pathological calendars.
+CALENDAR_MAX_ITEMS = 2000
+
+# Items.Restrict uses Jet syntax by default, which has no LIKE operator (and
+# this Outlook build also rejects the CI_* operators outright). LIKE is native
+# to DASL, so any filter containing a LIKE clause is translated wholesale to
+# DASL ("@SQL=" prefix): field references mapped via DASL_FIELD_MAP, boolean
+# literals normalized, and [Unread] comparison values inverted to match
+# httpmail:read semantics. Filters without LIKE pass through unchanged (pure
+# Jet), so existing behaviour is untouched.
+_JET_FIELD_RE = re.compile(r"\[\s*([A-Za-z][A-Za-z0-9_ ]*?)\s*\]")
+_JET_LIKE_RE = re.compile(
+    r"\[\s*[A-Za-z][A-Za-z0-9_ ]*?\s*\]\s+LIKE\s+'", re.IGNORECASE
+)
+_BOOL_CMP_RE = re.compile(r"(TRUE|FALSE)\b", re.IGNORECASE)
+_UNREAD_CMP_RE = re.compile(r'("urn:schemas:httpmail:read")\s*(=|<>)\s*(TRUE|FALSE)')
+
+# Single-quoted string literals (LIKE search patterns, date/string comparison
+# values) must never be touched by the field/boolean substitutions above —
+# e.g. '%[External]%' or '%TRUE%' is literal text to search for, not a field
+# reference or a boolean keyword. Jet/DASL filters in this codebase don't use
+# escaped quotes inside literals, so a non-greedy match to the next quote is
+# sufficient.
+_STRING_LITERAL_RE = re.compile(r"'[^']*'")
+_LITERAL_PLACEHOLDER = "\x00LITERAL{}\x00"
+
+
+def _jet_to_dasl(filter_query):
+    """Translate a Jet-style filter string to DASL ("@SQL=" prefixed)."""
+
+    def _field(match):
+        name = re.sub(r"\s+", "", match.group(1)).lower()
+        try:
+            return DASL_FIELD_MAP[name]
+        except KeyError:
+            supported = ", ".join(f"[{k.title()}]" for k in DASL_FIELD_MAP)
+            raise ValueError(
+                f"Cannot translate [Field] {match.group(1)!r} to DASL for LIKE "
+                f"filters. Supported fields: {supported}"
+            ) from None
+
+    # Mask out quoted literals before running the field/boolean substitutions
+    # so bracketed text or TRUE/FALSE keywords inside a LIKE pattern (e.g.
+    # '%[External]%', '%TRUE%') are never mistaken for filter syntax.
+    literals = []
+
+    def _mask(match):
+        literals.append(match.group(0))
+        return _LITERAL_PLACEHOLDER.format(len(literals) - 1)
+
+    dasl = _STRING_LITERAL_RE.sub(_mask, filter_query)
+
+    dasl = _JET_FIELD_RE.sub(_field, dasl)
+    # [Unread] mapped to httpmail:read has INVERTED semantics: flip the literal.
+    dasl = _UNREAD_CMP_RE.sub(
+        lambda m: f"{m.group(1)} {m.group(2)} {'0' if m.group(3).upper() == 'TRUE' else '1'}",
+        dasl,
+    )
+    # Remaining TRUE/FALSE literals (HasAttachments etc.) become 1/0, which
+    # DASL accepts for boolean properties.
+    dasl = _BOOL_CMP_RE.sub(
+        lambda m: "1" if m.group(1).upper() == "TRUE" else "0", dasl
+    )
+
+    # Restore the original literal text, untouched by the substitutions above.
+    for index, literal in enumerate(literals):
+        dasl = dasl.replace(_LITERAL_PLACEHOLDER.format(index), literal)
+
+    return f"@SQL={dasl}"
+
+
+def translate_filter(filter_query):
+    """
+    Prepare a user filter for Items.Restrict.
+
+    Filters without a LIKE clause are returned unchanged (Jet syntax, the
+    historical path). Filters containing "LIKE 'pattern'" are translated to
+    DASL so the wildcard pattern actually works: '%x%' contains, 'x%' starts
+    with, '%x' ends with — SQL LIKE semantics, case-insensitive.
+
+    Raises ValueError when a LIKE filter references a field without a known
+    DASL mapping.
+    """
+    if _JET_LIKE_RE.search(filter_query):
+        return _jet_to_dasl(filter_query)
+    return filter_query
 
 
 class OutlookBridge:
@@ -410,45 +554,212 @@ class OutlookBridge:
 
     def resolve_smtp_address(self, mail_item):
         """
-        Get SMTP address from Exchange address (EX type)
+        Get the SMTP address of a mail item's sender.
+
+        Robust against cached Exchange mode where Sender.GetExchangeUser() returns
+        None. Resolution order for EX-type senders:
+          1. Sender.GetExchangeUser().PrimarySmtpAddress   (original path)
+          2. PropertyAccessor -> PidTagSenderSmtpAddress   (0x5D01001F)
+          3. regex salvage of an SMTP token from SenderEmailAddress
+          4. the raw SenderEmailAddress (may be an Exchange DN)
 
         Args:
-            mail_item: Outlook MailItem
+            mail_item: Outlook MailItem (or compatible item with a Sender)
 
         Returns:
-            SMTP email address string
+            SMTP email address string ("" if nothing could be resolved)
         """
         try:
-            if (
-                (
-                    hasattr(mail_item, "SenderEmailType")
-                    and mail_item.SenderEmailType == "EX"
-                )
-                and hasattr(mail_item, "Sender")
-                and hasattr(mail_item.Sender, "GetExchangeUser")
-            ):
-                exchange_user = mail_item.Sender.GetExchangeUser()
-                if hasattr(exchange_user, "PrimarySmtpAddress"):
-                    return exchange_user.PrimarySmtpAddress
-            return (
-                mail_item.SenderEmailAddress
-                if hasattr(mail_item, "SenderEmailAddress")
-                else ""
-            )
-        except Exception:
-            return (
-                mail_item.SenderEmailAddress
-                if hasattr(mail_item, "SenderEmailAddress")
-                else ""
-            )
+            # Non-EX senders already carry an SMTP address; return as-is.
+            sender_email_type = self._safe_get_attr(mail_item, "SenderEmailType", "")
+            raw_address = self._safe_get_attr(mail_item, "SenderEmailAddress", "") or ""
+            if sender_email_type and sender_email_type != "EX":
+                return raw_address
 
-    def list_emails(self, limit=10, folder="Inbox"):
+            # EX path.
+            sender = self._safe_get_attr(mail_item, "Sender")
+            if sender is not None:
+                try:
+                    exchange_user = sender.GetExchangeUser()
+                except Exception:
+                    exchange_user = None
+                if exchange_user is not None:
+                    primary = self._safe_get_attr(exchange_user, "PrimarySmtpAddress")
+                    if primary:
+                        return primary
+
+            # PropertyAccessor: PidTagSenderSmtpAddress (reliable on Outlook 2007+).
+            try:
+                prop_accessor = mail_item.PropertyAccessor
+                smtp = prop_accessor.GetProperty(
+                    "http://schemas.microsoft.com/mapi/proptag/0x5D01001F"
+                )
+                if smtp:
+                    return smtp
+            except Exception:
+                pass
+
+            # Last-ditch salvage: pull an SMTP-shaped token out of whatever we have.
+            match = _SMTP_REGEX.search(raw_address)
+            if match:
+                return match.group(0)
+
+            return raw_address
+        except Exception:
+            return self._safe_get_attr(mail_item, "SenderEmailAddress", "") or ""
+
+    @staticmethod
+    def _format_com_datetime(value):
+        """Format a COM/pywintypes datetime to 'YYYY-MM-DD HH:MM:SS' or None.
+
+        Handles both real datetime objects (strftime) and pywintypes Time objects
+        (which expose Year/Month/.../Second properties).
         """
-        List emails from the specified folder
+        if not value:
+            return None
+        try:
+            if isinstance(value, datetime):
+                return value.strftime("%Y-%m-%d %H:%M:%S")
+            return datetime(
+                value.Year,
+                value.Month,
+                value.Day,
+                value.Hour,
+                value.Minute,
+                value.Second,
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _attachment_count(item):
+        """Return the number of attachments on a COM item (0 on any failure)."""
+        try:
+            return item.Attachments.Count
+        except Exception:
+            return 0
+
+    def _extract_attachments(self, item):
+        """Build a list of attachment-metadata dicts from a COM item."""
+        out = []
+        try:
+            attachments = item.Attachments
+            count = attachments.Count
+        except Exception:
+            return out
+        for i in range(1, count + 1):
+            try:
+                a = attachments.Item(i)
+            except Exception:
+                continue
+            out.append(
+                {
+                    "filename": self._safe_get_attr(a, "FileName", "") or "",
+                    "size": self._safe_get_attr(a, "Size", 0) or 0,
+                    "display_name": self._safe_get_attr(a, "DisplayName", "") or "",
+                    "content_type": self._safe_get_attr(a, "ContentType", None),
+                    "is_inline": bool(self._safe_get_attr(a, "IsInline", False)),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _clean_body_top(body, max_chars=1000):
+        """Return the 'new' portion of an email body: text before quoted reply
+        chains, forwarded headers, and signature blocks.
+
+        Pure-Python heuristic so it is unit-testable without Outlook. Trims and
+        collapses runs of blank lines, then caps to max_chars.
+        """
+        if not body:
+            return ""
+        text = body.replace("\r\n", "\n").replace("\r", "\n")
+        kept = []
+        for line in text.split("\n"):
+            stripped = line.strip()
+            low = stripped.lower()
+            # Outlook/Outlook-style forwarded or original-message header blocks.
+            if low.startswith(
+                (
+                    "-----original message",
+                    "-----origineel bericht",
+                    "-----message réenvoyé",
+                    "----- doorgestuurd bericht",
+                    "-----transcribed message",
+                )
+            ):
+                break
+            # Quoted line.
+            if line.lstrip().startswith(">"):
+                break
+            # Signature separator (a run of underscores).
+            if len(stripped) >= 5 and set(stripped) <= {"_"}:
+                break
+            # Reply header lines carrying an address.
+            if low.startswith(("from:", "van:")) and ("@" in line or "<" in line):
+                break
+            if low.startswith(("to:", "cc:", "bcc:")) and "@" in line and kept:
+                break
+            if low.startswith(("sent:", "verzonden:")) and kept:
+                break
+            # "On <date> X wrote:" / "Op <date> schreef X:" footer lines.
+            if (low.endswith("wrote:") or low.endswith("schreef:")) and len(low) < 120:
+                break
+            kept.append(line)
+        cleaned = "\n".join(kept).strip()
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned[:max_chars]
+
+    def _mail_item_to_dict(self, item, *, include_body=False):
+        """Build an email dict from a COM item using safe accessors throughout.
+
+        Works for MailItem as well as non-mail items (meeting notifications, etc.):
+        fields that don't exist on the item type come back as defaults instead of
+        raising, so callers can branch on 'message_class' rather than catch errors.
+        """
+        message_class = (
+            self._safe_get_attr(item, "MessageClass", "IPM.Note") or "IPM.Note"
+        )
+        d = {
+            "entry_id": self._safe_get_attr(item, "EntryID", "") or "",
+            "subject": self._safe_get_attr(item, "Subject", "") or "",
+            "sender": self.resolve_smtp_address(item),
+            "sender_name": self._safe_get_attr(item, "SenderName", "") or "",
+            "received_time": self._format_com_datetime(
+                self._safe_get_attr(item, "ReceivedTime")
+            ),
+            "sent_time": self._format_com_datetime(self._safe_get_attr(item, "SentOn")),
+            "unread": bool(self._safe_get_attr(item, "Unread", False)),
+            "has_attachments": self._attachment_count(item) > 0,
+            "message_class": message_class,
+            "to": self._safe_get_attr(item, "To", "") or "",
+            "cc": self._safe_get_attr(item, "CC", "") or "",
+            "conversation_id": self._safe_get_attr(item, "ConversationID", None),
+            "conversation_topic": self._safe_get_attr(item, "ConversationTopic", None),
+        }
+        if include_body:
+            body = self._safe_get_attr(item, "Body", "") or ""
+            html_body = self._safe_get_attr(item, "HTMLBody", "") or ""
+            d["body"] = body
+            d["html_body"] = html_body
+            d["body_top"] = self._clean_body_top(body)
+            d["bcc"] = self._safe_get_attr(item, "BCC", "") or ""
+            d["attachments"] = self._extract_attachments(item)
+        return d
+
+    def list_emails(self, limit=10, folder="Inbox", include_non_mail=False):
+        """
+        List emails from the specified folder.
+
+        By default only real email items (MessageClass IPM.Note and subtypes) are
+        returned; meeting notifications and other inbox item types are filtered out
+        at the COM level for efficiency. Pass include_non_mail=True to include them.
 
         Args:
             limit: Maximum number of emails to return
             folder: Folder name (default: Inbox)
+            include_non_mail: If True, also return non-mail items (meeting
+                notifications, post items, etc.)
 
         Returns:
             List of email dictionaries
@@ -461,7 +772,16 @@ class OutlookBridge:
             if not inbox:
                 inbox = self.get_inbox()
 
+        if inbox is None:
+            return []
+
         items = inbox.Items
+
+        # Filter to real emails (IPM.Note*) unless the caller opts out.
+        if not include_non_mail:
+            # Restrict can fail on unusual folders; fall back to unfiltered.
+            with contextlib.suppress(Exception):
+                items = items.Restrict(MAIL_ONLY_FILTER)
 
         # Sort by received time, most recent first
         items.Sort("[ReceivedTime]", True)
@@ -471,20 +791,8 @@ class OutlookBridge:
         for item in items:
             if count >= limit:
                 break
-
             try:
-                email = {
-                    "entry_id": item.EntryID,
-                    "subject": item.Subject,
-                    "sender": self.resolve_smtp_address(item),
-                    "sender_name": item.SenderName,
-                    "received_time": item.ReceivedTime.strftime("%Y-%m-%d %H:%M:%S")
-                    if item.ReceivedTime
-                    else None,
-                    "unread": item.Unread,
-                    "has_attachments": item.Attachments.Count > 0,
-                }
-                emails.append(email)
+                emails.append(self._mail_item_to_dict(item, include_body=False))
                 count += 1
             except Exception:
                 # Skip items that can't be accessed
@@ -494,32 +802,109 @@ class OutlookBridge:
 
     def get_email_body(self, entry_id):
         """
-        Get the full body of an email by entry ID (O(1) direct access)
+        Get the full body and metadata of an item by entry ID (O(1) direct access).
+
+        Works for any item type that lives in the mailbox: a real email returns
+        body/html_body and full headers; a non-mail item (e.g. a meeting
+        notification) returns everything that is accessible plus its message_class
+        so the caller can branch. Returns None only when no item matches the ID.
 
         Args:
             entry_id: Outlook EntryID of the email
 
         Returns:
-            Email dictionary with body
+            Email dictionary with body, or None if the item is not found
         """
         item = self.get_item_by_id(entry_id)
-        if item:
+        if item is None:
+            return None
+        try:
+            return self._mail_item_to_dict(item, include_body=True)
+        except Exception:
+            return None
+
+    def get_email_bodies(self, entry_ids, include_body=True):
+        """
+        Bulk-fetch full details for many EntryIDs in a single call (O(1) each).
+
+        Avoids the N+1 round-trip pattern of calling get_email_body once per item.
+
+        Args:
+            entry_ids: Iterable of Outlook EntryIDs
+            include_body: If False, fetch only summary fields (faster)
+
+        Returns:
+            List of email dictionaries for items that were found (missing IDs are
+            silently omitted)
+        """
+        results = []
+        for entry_id in entry_ids or []:
             try:
-                return {
-                    "entry_id": item.EntryID,
-                    "subject": item.Subject,
-                    "sender": self.resolve_smtp_address(item),
-                    "sender_name": item.SenderName,
-                    "body": item.Body,
-                    "html_body": item.HTMLBody,
-                    "received_time": item.ReceivedTime.strftime("%Y-%m-%d %H:%M:%S")
-                    if item.ReceivedTime
-                    else None,
-                    "has_attachments": item.Attachments.Count > 0,
-                }
+                item = self.get_item_by_id(entry_id)
             except Exception:
-                return None
-        return None
+                item = None
+            if item is None:
+                continue
+            try:
+                results.append(self._mail_item_to_dict(item, include_body=include_body))
+            except Exception:
+                continue
+        return results
+
+    @staticmethod
+    def _to_naive_datetime(value):
+        """
+        Normalize a COM/pywintypes datetime (or a datetime-like with
+        capitalized components) to a naive Python datetime.
+
+        Returns None when the value cannot be normalized.
+        """
+        try:
+            if isinstance(value, datetime):
+                # drop tzinfo if present so we can compare with datetime.now()
+                return datetime(
+                    value.year,
+                    value.month,
+                    value.day,
+                    value.hour,
+                    value.minute,
+                    value.second,
+                )
+            return datetime(
+                value.Year,
+                value.Month,
+                value.Day,
+                value.Hour,
+                value.Minute,
+                value.Second,
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _calendar_range_filter(start_dt, end_dt):
+        """
+        Build the combined DASL filter for appointments overlapping
+        [start_dt, end_dt]: the MessageClass range (appointments only, so
+        meeting requests/responses cannot poison iteration) AND the date
+        window, applied in ONE Restrict call.
+
+        Dates use DASL with ISO literals ("YYYY-MM-DD HH:MM") because Jet
+        date literals are parsed according to the user's Windows locale: on a
+        Dutch-locale system "09/01/2026 12:00" silently parses as 9 January,
+        yielding mysteriously empty results for windows whose day component
+        is <= 12. DASL + ISO is locale-independent (verified live).
+        """
+        return (
+            '@SQL=("http://schemas.microsoft.com/mapi/proptag/0x001A001F" '
+            ">= 'IPM.Appointment' "
+            'AND "http://schemas.microsoft.com/mapi/proptag/0x001A001F" '
+            "< 'IPM.Appointment{') "
+            'AND ("urn:schemas:calendar:dtstart" <= '
+            f"'{end_dt.strftime('%Y-%m-%d %H:%M')}') "
+            'AND ("urn:schemas:calendar:dtend" >= '
+            f"'{start_dt.strftime('%Y-%m-%d %H:%M')}')"
+        )
 
     def list_calendar_events(self, days=7, all_events=False):
         """
@@ -527,7 +912,10 @@ class OutlookBridge:
 
         Args:
             days: Number of days ahead to look
-            all_events: If True, return all events without date filtering
+            all_events: If True, look ahead further than `days`: from now
+                through +CALENDAR_ALL_EVENTS_MAX_DAYS (365). A truly unbounded
+                scan would expand every recurring series forever and block
+                Outlook's COM apartment, wedging the server.
 
         Returns:
             List of event dictionaries
@@ -535,32 +923,32 @@ class OutlookBridge:
         calendar = self.get_calendar()
         items = calendar.Items
 
-        # CRITICAL: Filter to only appointment items before any other operations
-        # This prevents COM errors when encountering meeting requests/responses
-        items = items.Restrict(
-            "[MessageClass] >= 'IPM.Appointment' AND [MessageClass] < 'IPM.Appointment{'"
-        )
-
-        # CRITICAL: Enable recurrence expansion BEFORE sorting
-        # Must sort ascending for recurrence to work properly
+        # Canonical order per Microsoft docs: Sort -> IncludeRecurrences ->
+        # a single Restrict. The old code applied a second Restrict AFTER
+        # setting IncludeRecurrences, which drops recurrence expansion on the
+        # re-derived collection and yields flaky (often empty) results for
+        # some date windows.
+        items.Sort("[Start]")  # ascending, required for recurrence expansion
         items.IncludeRecurrences = True
-        items.Sort("[Start]")  # Ascending for recurrence
 
-        # CRITICAL FIX: Apply Restrict BEFORE iterating to avoid "Calendar Bomb"
-        # Without this, recurring meetings without end dates generate infinite items
-        if not all_events:
-            start_date = datetime.now()
-            end_date = start_date + timedelta(days=days)
-            # Jet SQL format for dates: MM/DD/YYYY HH:MM
-            # Use Restrict to filter at COM level before Python iteration
-            filter_str = (
-                f"[Start] <= '{end_date.strftime('%m/%d/%Y %H:%M')}' "
-                f"AND [End] >= '{start_date.strftime('%m/%d/%Y %H:%M')}'"
-            )
-            items = items.Restrict(filter_str)
+        start_dt = datetime.now()
+        if all_events:
+            end_dt = start_dt + timedelta(days=CALENDAR_ALL_EVENTS_MAX_DAYS)
+        else:
+            days = max(1, min(days, CALENDAR_ALL_EVENTS_MAX_DAYS))
+            end_dt = start_dt + timedelta(days=days)
+
+        # Single COM-level Restrict: appointments only + overlap window.
+        # This is also what prevents the "Calendar Bomb" (infinite recurring
+        # items) from ever reaching Python iteration.
+        items = items.Restrict(self._calendar_range_filter(start_dt, end_dt))
 
         events = []
+        scanned = 0
         for item in items:
+            scanned += 1
+            if scanned > CALENDAR_MAX_ITEMS:
+                break
             try:
                 # Use safe attribute access to handle COM errors
                 start = self._safe_get_attr(item, "Start")
@@ -570,38 +958,16 @@ class OutlookBridge:
                 if not start:
                     continue
 
-                # Additional Python-level filtering for safety (in case Restrict wasn't applied)
-                if not all_events:
-                    start_date = datetime.now()
-                    end_date = start_date + timedelta(days=days)
-                    # Normalize COM/pywintypes datetimes to naive Python datetimes for comparison
-                    start_dt = None
-                    try:
-                        if isinstance(start, datetime):
-                            # drop tzinfo if present to compare with datetime.now()
-                            start_dt = datetime(
-                                start.year,
-                                start.month,
-                                start.day,
-                                start.hour,
-                                start.minute,
-                                start.second,
-                            )
-                        else:
-                            start_dt = datetime(
-                                start.Year,
-                                start.Month,
-                                start.Day,
-                                start.Hour,
-                                start.Minute,
-                                start.Second,
-                            )
-                    except Exception:
-                        # If normalization fails, skip this item
-                        continue
-
-                    if not (start_dt >= start_date and start_dt <= end_date):
-                        continue
+                # Python-level overlap re-check (defence in depth; the COM
+                # filter above should already have scoped correctly).
+                start_n = self._to_naive_datetime(start)
+                end_n = self._to_naive_datetime(end)
+                if start_n is None:
+                    continue
+                if start_n > end_dt:
+                    continue
+                if end_n is not None and end_n < start_dt:
+                    continue
 
                 # Get attendees (safe access)
                 required_attendees = self._safe_get_attr(item, "RequiredAttendees", "")
@@ -1377,58 +1743,106 @@ class OutlookBridge:
                 pass
         return False
 
-    def search_emails(self, filter_query, limit=100):
+    def search_emails(self, filter_query, limit=100, include_non_mail=False):
         """
-        Search emails using Outlook Restriction filter (O(1) search, no iteration)
+        Search emails using Outlook Restrict filter (O(1) search, no iteration).
+
+        By default only real emails (MessageClass IPM.Note and subtypes) are
+        returned; pass include_non_mail=True to also match meeting items etc.
+
+        SQL-style LIKE patterns are accepted and translated automatically:
+        Items.Restrict's default Jet syntax has no LIKE, so any filter with a
+        LIKE clause is rewritten to DASL ("[Subject] LIKE '%meeting%'" runs as
+        an @SQL= query with SQL LIKE wildcard semantics, case-insensitive).
+
+        NOTE on dates in plain (non-LIKE) filters: Jet date literals are
+        parsed according to the user's Windows locale — on e.g. a Dutch
+        locale, '07/01/2026' means 7 January. Prefer unambiguous literals for
+        your locale (e.g. '2026-07-01 00:00' or '01-07-2026' on NL locales)
+        when filtering by ReceivedTime.
 
         Args:
-            filter_query: SQL query string for filtering
+            filter_query: Filter query string for filtering (e.g. "[Unread] = TRUE",
+                "[Subject] LIKE '%meeting%'", or a date range — see the locale
+                note above)
             limit: Max results to return
+            include_non_mail: If True, do not scope the filter to IPM.Note items
 
         Returns:
             List of email dictionaries
+
+        Raises:
+            ValueError: If a LIKE filter references a field without a known
+                DASL mapping (supported: the fields in DASL_FIELD_MAP).
+            RuntimeError: If Outlook rejects the filter (invalid syntax) or the
+                COM call fails. Callers previously saw a silent empty list here,
+                which made bad filters indistinguishable from "no matches".
         """
-        try:
-            # Use get_inbox() directly to ensure correct account
-            folder = self.get_inbox()
+        # Use get_inbox() directly to ensure correct account
+        folder = self.get_inbox()
 
-            items = folder.Items
-            # Apply restriction filter
-            items = items.Restrict(filter_query)
+        # Translate SQL-style LIKE filters to DASL so wildcards actually work.
+        raw_query = filter_query or ""
+        mentions_message_class = "messageclass" in raw_query.lower()
+        prepared = translate_filter(raw_query)
+        dasl_mode = prepared.startswith("@SQL=")
 
-            # Sort by received time, most recent first
-            items.Sort("[ReceivedTime]", True)
+        items = folder.Items
+        # Compose the effective filter. Unless the caller opts out of the
+        # mail-only scope (or already mentioned MessageClass themselves),
+        # AND in the IPM.Note range so meeting/post items are excluded.
+        # DASL needs the "@SQL=" prefix at the very start of the whole string.
+        scope = DASL_MAIL_ONLY_FILTER if dasl_mode else MAIL_ONLY_FILTER
+        scope_needed = (
+            bool(prepared) and not include_non_mail and (not mentions_message_class)
+        )
+        if prepared and scope_needed:
+            if dasl_mode:
+                effective_filter = f"@SQL=({prepared[len('@SQL=') :]}) AND {scope}"
+            else:
+                effective_filter = f"({prepared}) AND {scope}"
+        elif prepared:
+            effective_filter = prepared
+        elif not include_non_mail:
+            effective_filter = scope
+        else:
+            effective_filter = None
 
-            emails = []
-            count = 0
-            for item in items:
-                if count >= limit:
-                    break
+        if effective_filter:
+            try:
+                # Apply restriction filter
+                items = items.Restrict(effective_filter)
+            except Exception as e:
+                msg = (
+                    f"Outlook Restrict failed (filter={effective_filter!r}): {e}. "
+                    "Note: Jet syntax is the default; LIKE filters are "
+                    "translated to DASL automatically, other SQL-isms "
+                    "(IN/GLOB/underscore wildcards) are not."
+                )
+                print(f"Error searching emails: {msg}", file=sys.stderr)
+                raise RuntimeError(msg) from e
 
-                try:
-                    email = {
-                        "entry_id": item.EntryID,
-                        "subject": item.Subject,
-                        "sender": self.resolve_smtp_address(item),
-                        "sender_name": item.SenderName,
-                        "received_time": item.ReceivedTime.strftime("%Y-%m-%d %H:%M:%S")
-                        if item.ReceivedTime
-                        else None,
-                        "unread": item.Unread,
-                        "has_attachments": item.Attachments.Count > 0,
-                    }
-                    emails.append(email)
-                    count += 1
-                except Exception:
-                    # Skip items that can't be accessed
-                    continue
+        # Sort by received time, most recent first
+        items.Sort("[ReceivedTime]", True)
 
-            return emails
-        except Exception as e:
-            print(f"Error searching emails: {e}", file=sys.stderr)
-            return []
+        emails = []
+        count = 0
+        for item in items:
+            if count >= limit:
+                break
 
-    def search_by_sender(self, sender_email, limit=100, folder="Inbox"):
+            try:
+                emails.append(self._mail_item_to_dict(item, include_body=False))
+                count += 1
+            except Exception:
+                # Skip items that can't be accessed
+                continue
+
+        return emails
+
+    def search_by_sender(
+        self, sender_email, limit=100, folder="Inbox", include_non_mail=False
+    ):
         """
         Search emails by sender email address (handles Exchange addresses).
 
@@ -1440,6 +1854,7 @@ class OutlookBridge:
             sender_email: Email address to search for
             limit: Max results to return (default: 100)
             folder: Folder name to search in (default: "Inbox")
+            include_non_mail: If True, also consider non-mail items
 
         Returns:
             List of email dictionaries matching the sender
@@ -1454,9 +1869,14 @@ class OutlookBridge:
                     mail_folder = self.get_inbox()
 
             items = mail_folder.Items
+            # Filter to real emails unless the caller opts out.
+            if not include_non_mail:
+                with contextlib.suppress(Exception):
+                    items = items.Restrict(MAIL_ONLY_FILTER)
             # Sort by received time, most recent first
             items.Sort("[ReceivedTime]", True)
 
+            target = (sender_email or "").lower()
             emails = []
             count = 0
             for item in items:
@@ -1464,23 +1884,10 @@ class OutlookBridge:
                     break
 
                 try:
-                    # Resolve SMTP address (handles Exchange addresses)
-                    smtp_address = self.resolve_smtp_address(item)
-
-                    # Case-insensitive email match
-                    if smtp_address.lower() == sender_email.lower():
-                        email = {
-                            "entry_id": item.EntryID,
-                            "subject": item.Subject,
-                            "sender": smtp_address,
-                            "sender_name": item.SenderName,
-                            "received_time": item.ReceivedTime.strftime("%Y-%m-%d %H:%M:%S")
-                            if item.ReceivedTime
-                            else None,
-                            "unread": item.Unread,
-                            "has_attachments": item.Attachments.Count > 0,
-                        }
-                        emails.append(email)
+                    d = self._mail_item_to_dict(item, include_body=False)
+                    # Case-insensitive email match on the resolved SMTP address
+                    if d["sender"] and d["sender"].lower() == target:
+                        emails.append(d)
                         count += 1
                 except Exception:
                     # Skip items that can't be accessed
@@ -1490,6 +1897,40 @@ class OutlookBridge:
         except Exception as e:
             print(f"Error searching emails by sender: {e}", file=sys.stderr)
             return []
+
+    def get_inbox_stats(self, folder="Inbox"):
+        """
+        Return cheap total/unread counts for a folder without fetching items.
+
+        Uses Restrict+Count at the COM level so it is O(1)-ish regardless of
+        folder size. Useful for pagination decisions and inbox monitoring.
+
+        Args:
+            folder: Folder name (default: "Inbox")
+
+        Returns:
+            Dict with 'folder', 'total', and 'unread' integer counts
+        """
+        try:
+            if folder == "Inbox":
+                mail_folder = self.get_inbox()
+            else:
+                mail_folder = self.get_folder_by_name(folder)
+                if not mail_folder:
+                    mail_folder = self.get_inbox()
+
+            if mail_folder is None:
+                return {"folder": folder, "total": 0, "unread": 0}
+
+            items = mail_folder.Items
+            total = self._safe_get_attr(items, "Count", 0) or 0
+            try:
+                unread = items.Restrict("[Unread] = TRUE").Count
+            except Exception:
+                unread = 0
+            return {"folder": folder, "total": int(total), "unread": int(unread)}
+        except Exception:
+            return {"folder": folder, "total": 0, "unread": 0}
 
     def get_free_busy(
         self, email_address=None, start_date=None, end_date=None, entry_id=None
