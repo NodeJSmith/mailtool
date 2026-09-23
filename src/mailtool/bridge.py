@@ -24,6 +24,7 @@ import contextlib
 import re
 import sys
 import traceback
+from collections import deque
 from datetime import datetime, timedelta
 
 try:
@@ -170,6 +171,83 @@ def translate_filter(filter_query):
     if _JET_LIKE_RE.search(filter_query):
         return _jet_to_dasl(filter_query)
     return filter_query
+
+
+# Maximum depth (levels below an account root) get_folder_by_name will
+# recurse into when searching for a bare folder name. Real mailbox trees
+# rarely nest more than a handful of levels deep; this just bounds
+# pathological cases.
+FOLDER_SEARCH_MAX_DEPTH = 8
+
+# Maximum total folders _find_folder_by_name will visit across the whole
+# search, independent of depth. A depth bound alone doesn't limit the work
+# for a wide tree — a mailbox with thousands of folders spread across a few
+# levels can still visit all of them, and each visit is a synchronous COM
+# call on the main thread. This caps the worst case regardless of shape.
+FOLDER_SEARCH_MAX_VISITED = 500
+
+
+def _folder_by_path(root, path_parts):
+    """Walk a list of folder-name segments from `root` (e.g. ["Inbox",
+    "Databricks Alerts"]). Each segment is matched case-insensitively.
+    Returns the resolved folder, or None if any segment doesn't exist."""
+    current = root
+    for part in path_parts:
+        try:
+            current = current.Folders[part]
+            continue
+        except Exception:
+            pass
+        matched = None
+        try:
+            for f in current.Folders:
+                if str(f.Name).strip().lower() == str(part).strip().lower():
+                    matched = f
+                    break
+        except Exception:
+            return None
+        if matched is None:
+            return None
+        current = matched
+    return current
+
+
+def _find_folder_by_name(folder, target_name, max_depth, max_visited=FOLDER_SEARCH_MAX_VISITED):
+    """Breadth-first, case-insensitive search for `target_name` among the
+    descendants of `folder`, bounded to `max_depth` levels below it and
+    `max_visited` folders visited in total.
+
+    get_folder_by_name previously only checked an account root's *direct*
+    children — a subfolder nested one level deeper (e.g. "Databricks
+    Alerts" under "Inbox") could never be found by name alone, and callers
+    silently fell back to Inbox instead. This walks the whole subtree.
+
+    The depth bound alone doesn't cap the amount of work for a wide tree —
+    a mailbox with many folders at one level would still visit all of them.
+    `max_visited` bounds the total regardless of shape, since each visit is
+    a synchronous COM call on the main thread.
+    """
+    target_lower = str(target_name).strip().lower()
+    frontier = deque([(folder, 0)])
+    visited = 0
+    while frontier and visited < max_visited:
+        current, depth = frontier.popleft()
+        try:
+            children = list(current.Folders)
+        except Exception:
+            continue
+        for child in children:
+            visited += 1
+            try:
+                if str(child.Name).strip().lower() == target_lower:
+                    return child
+            except Exception:
+                continue
+            if depth + 1 < max_depth:
+                frontier.append((child, depth + 1))
+            if visited >= max_visited:
+                break
+    return None
 
 
 class OutlookBridge:
@@ -470,72 +548,108 @@ class OutlookBridge:
 
     def get_folder_by_name(self, folder_name):
         """
-        Get a folder by name (e.g., "Sent Items", "Archive", etc.)
+        Get a folder by name or by a "\\"-separated path from an account
+        root (e.g. "Sent Items", "Archive", or "Inbox\\Databricks Alerts"
+        for a subfolder).
+
+        A bare name is resolved with a bounded recursive search across the
+        whole folder tree (see FOLDER_SEARCH_MAX_DEPTH) — not just an
+        account root's direct children. Use a "\\"-separated path instead
+        when two folders share a name under different parents.
 
         Args:
-            folder_name: Name of the folder
+            folder_name: Folder name, or a "\\"-separated path
 
         Returns:
             Folder object or None
         """
-        # Try default account root first
         if not folder_name:
             return None
 
+        path_parts = [p for p in str(folder_name).split("\\") if p]
+        if not path_parts:
+            # e.g. folder_name == "\\" or "\\\\" — passes the truthiness
+            # check above but every segment is empty after filtering.
+            return None
+        if len(path_parts) > 1:
+            root = self._get_root()
+            if root:
+                found = _folder_by_path(root, path_parts)
+                if found:
+                    return found
+
+            try:
+                count = self.namespace.Folders.Count
+            except Exception:
+                count = 0
+            for i in range(1, (count or 0) + 1):
+                try:
+                    parent = self.namespace.Folders.Item(i)
+                except Exception:
+                    continue
+                found = _folder_by_path(parent, path_parts)
+                if found:
+                    return found
+            return None
+
+        target_name = path_parts[0]
+
         root = self._get_root()
         if root:
-            try:
-                return root.Folders[folder_name]
-            except Exception:
-                try:
-                    for f in root.Folders:
-                        if (
-                            str(f.Name).strip().lower()
-                            == str(folder_name).strip().lower()
-                        ):
-                            return f
-                except Exception:
-                    pass
+            found = _find_folder_by_name(
+                root, target_name, FOLDER_SEARCH_MAX_DEPTH, max_visited=FOLDER_SEARCH_MAX_VISITED
+            )
+            if found:
+                return found
 
-        # Search across all account roots
         try:
             count = self.namespace.Folders.Count
         except Exception:
-            count = None
-
-        if count and count > 0:
-            for i in range(1, count + 1):
-                try:
-                    parent = self.namespace.Folders.Item(i)
-                    try:
-                        return parent.Folders[folder_name]
-                    except Exception:
-                        # case-insensitive search in this parent
-                        try:
-                            for f in parent.Folders:
-                                if (
-                                    str(f.Name).strip().lower()
-                                    == str(folder_name).strip().lower()
-                                ):
-                                    return f
-                        except Exception:
-                            pass
-                except Exception:
-                    continue
-
-        # Last resort: try the first root's children
-        try:
-            root = self.namespace.Folders.Item(1)
+            count = 0
+        for i in range(1, (count or 0) + 1):
             try:
-                return root.Folders[folder_name]
+                parent = self.namespace.Folders.Item(i)
             except Exception:
-                for f in root.Folders:
-                    if str(f.Name).strip().lower() == str(folder_name).strip().lower():
-                        return f
-        except Exception:
-            pass
+                continue
+            found = _find_folder_by_name(
+                parent, target_name, FOLDER_SEARCH_MAX_DEPTH, max_visited=FOLDER_SEARCH_MAX_VISITED
+            )
+            if found:
+                return found
 
         return None
+
+    def _resolve_folder(self, folder):
+        """
+        Resolve `folder` to a mail folder, warning to stderr and falling
+        back to Inbox when it can't be found.
+
+        "resolve folder by name, warn and fall back to Inbox if missing"
+        is needed by every caller that accepts a folder name (list_emails,
+        search_by_sender, get_inbox_stats) — centralized here so the
+        warning text and fallback behavior can't drift between them.
+
+        Args:
+            folder: Folder name (or "Inbox")
+
+        Returns:
+            (mail_folder, resolved_name) — resolved_name is "Inbox" when a
+            fallback occurred, not the originally requested name, so
+            callers that report the folder name back to the caller don't
+            attribute results to a folder that was never queried.
+        """
+        if folder == "Inbox":
+            return self.get_inbox(), "Inbox"
+
+        mail_folder = self.get_folder_by_name(folder)
+        if mail_folder:
+            return mail_folder, folder
+
+        print(
+            f"Warning: Folder '{folder}' not found, falling back to Inbox",
+            file=sys.stderr,
+        )
+        return self.get_inbox(), "Inbox"
 
     def get_item_by_id(self, entry_id):
         """
@@ -764,13 +878,7 @@ class OutlookBridge:
         Returns:
             List of email dictionaries
         """
-        # Use get_inbox() for the default Inbox to ensure correct account
-        if folder == "Inbox":
-            inbox = self.get_inbox()
-        else:
-            inbox = self.get_folder_by_name(folder)
-            if not inbox:
-                inbox = self.get_inbox()
+        inbox, _ = self._resolve_folder(folder)
 
         if inbox is None:
             return []
@@ -1860,13 +1968,7 @@ class OutlookBridge:
             List of email dictionaries matching the sender
         """
         try:
-            # Get the folder
-            if folder == "Inbox":
-                mail_folder = self.get_inbox()
-            else:
-                mail_folder = self.get_folder_by_name(folder)
-                if not mail_folder:
-                    mail_folder = self.get_inbox()
+            mail_folder, _ = self._resolve_folder(folder)
 
             items = mail_folder.Items
             # Filter to real emails unless the caller opts out.
@@ -1912,15 +2014,10 @@ class OutlookBridge:
             Dict with 'folder', 'total', and 'unread' integer counts
         """
         try:
-            if folder == "Inbox":
-                mail_folder = self.get_inbox()
-            else:
-                mail_folder = self.get_folder_by_name(folder)
-                if not mail_folder:
-                    mail_folder = self.get_inbox()
+            mail_folder, queried_folder = self._resolve_folder(folder)
 
             if mail_folder is None:
-                return {"folder": folder, "total": 0, "unread": 0}
+                return {"folder": queried_folder, "total": 0, "unread": 0}
 
             items = mail_folder.Items
             total = self._safe_get_attr(items, "Count", 0) or 0
@@ -1928,7 +2025,11 @@ class OutlookBridge:
                 unread = items.Restrict("[Unread] = TRUE").Count
             except Exception:
                 unread = 0
-            return {"folder": folder, "total": int(total), "unread": int(unread)}
+            return {
+                "folder": queried_folder,
+                "total": int(total),
+                "unread": int(unread),
+            }
         except Exception:
             return {"folder": folder, "total": 0, "unread": 0}
 
