@@ -54,6 +54,26 @@ class TestTranslateFilter:
         query = "[Unread] = TRUE AND [ReceivedTime] >= '05/01/2026 00:00'"
         assert translate_filter(query) == query
 
+    def test_standalone_hasattachments_routed_through_dasl(self):
+        # No LIKE clause here — [HasAttachments] alone must still trigger
+        # DASL translation, since Jet rejects this property outright on
+        # this Outlook build ("The property \"HasAttachments\" is
+        # unknown"), verified against a live mailbox.
+        result = translate_filter("[HasAttachments] = TRUE")
+        assert result == '@SQL="urn:schemas:httpmail:hasattachment" = 1'
+
+    def test_standalone_hasattachments_false_also_routed(self):
+        result = translate_filter("[HasAttachments] = FALSE")
+        assert result == '@SQL="urn:schemas:httpmail:hasattachment" = 0'
+
+    def test_bracketed_literal_text_does_not_force_dasl_routing(self):
+        # A quoted literal that happens to contain "[HasAttachments]" is not
+        # a real field reference and must not force DASL translation — this
+        # filter has no LIKE clause and no genuine forced field, so it
+        # should pass through unchanged (pure Jet).
+        query = "[Body] = 'note: [HasAttachments] mentioned'"
+        assert translate_filter(query) == query
+
     def test_like_keyword_case_insensitive(self):
         # keyword case is preserved in the output; DASL keywords are
         # case-insensitive
