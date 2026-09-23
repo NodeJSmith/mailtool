@@ -83,8 +83,23 @@ class TestTranslateFilter:
             "[ReceivedTime] >= '08/01/2026 00:00'"
         )
         assert result.startswith("@SQL=")
-        assert '"urn:schemas:httpmail:senderemail" LIKE' in result
+        # Proptag, not urn:schemas:httpmail:senderemail — see
+        # test_senderemailaddress_mapped_via_proptag for why.
+        assert (
+            '"http://schemas.microsoft.com/mapi/proptag/0x0C1F001F" LIKE'
+            in result
+        )
         assert '"urn:schemas:httpmail:date" >= ' in result
+
+    def test_senderemailaddress_mapped_via_proptag(self):
+        # Mirrors test_messageclass_mapped_via_proptag: the httpmail schema
+        # property for sender email is unreliably populated, so this field
+        # is mapped via the MAPI proptag for PR_SENDER_EMAIL_ADDRESS instead.
+        result = translate_filter("[SenderEmailAddress] LIKE '%databricks.com%'")
+        assert result == (
+            '@SQL="http://schemas.microsoft.com/mapi/proptag/0x0C1F001F" '
+            "LIKE '%databricks.com%'"
+        )
 
     def test_unknown_field_raises_value_error(self):
         with pytest.raises(ValueError, match="Cannot translate"):

@@ -57,7 +57,14 @@ DASL_MAIL_ONLY_FILTER = (
 DASL_FIELD_MAP = {
     "subject": '"urn:schemas:httpmail:subject"',
     "sendername": '"urn:schemas:httpmail:sendername"',
-    "senderemailaddress": '"urn:schemas:httpmail:senderemail"',
+    # NOTE: mapped via MAPI proptag (PR_SENDER_EMAIL_ADDRESS, 0x0C1F), not
+    # urn:schemas:httpmail:senderemail. The httpmail property is unreliably
+    # populated on Exchange Online mailboxes — LIKE queries against it can
+    # silently match zero items even when [SenderEmailAddress] = '...'
+    # (plain Jet, same underlying MAPI property) finds the message. Verified
+    # against a live mailbox: same fix already applied to messageclass below
+    # for the same reason.
+    "senderemailaddress": '"http://schemas.microsoft.com/mapi/proptag/0x0C1F001F"',
     "receivedtime": '"urn:schemas:httpmail:date"',
     # NOTE: inverted semantics — httpmail:read = 0 means UNREAD.
     "unread": '"urn:schemas:httpmail:read"',
