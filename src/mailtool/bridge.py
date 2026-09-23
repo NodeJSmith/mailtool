@@ -101,6 +101,15 @@ _JET_LIKE_RE = re.compile(
 _BOOL_CMP_RE = re.compile(r"(TRUE|FALSE)\b", re.IGNORECASE)
 _UNREAD_CMP_RE = re.compile(r'("urn:schemas:httpmail:read")\s*(=|<>)\s*(TRUE|FALSE)')
 
+# Single-quoted string literals (LIKE search patterns, date/string comparison
+# values) must never be touched by the field/boolean substitutions above —
+# e.g. '%[External]%' or '%TRUE%' is literal text to search for, not a field
+# reference or a boolean keyword. Jet/DASL filters in this codebase don't use
+# escaped quotes inside literals, so a non-greedy match to the next quote is
+# sufficient.
+_STRING_LITERAL_RE = re.compile(r"'[^']*'")
+_LITERAL_PLACEHOLDER = "\x00LITERAL{}\x00"
+
 
 def _jet_to_dasl(filter_query):
     """Translate a Jet-style filter string to DASL ("@SQL=" prefixed)."""
@@ -116,7 +125,18 @@ def _jet_to_dasl(filter_query):
                 f"filters. Supported fields: {supported}"
             ) from None
 
-    dasl = _JET_FIELD_RE.sub(_field, filter_query)
+    # Mask out quoted literals before running the field/boolean substitutions
+    # so bracketed text or TRUE/FALSE keywords inside a LIKE pattern (e.g.
+    # '%[External]%', '%TRUE%') are never mistaken for filter syntax.
+    literals = []
+
+    def _mask(match):
+        literals.append(match.group(0))
+        return _LITERAL_PLACEHOLDER.format(len(literals) - 1)
+
+    dasl = _STRING_LITERAL_RE.sub(_mask, filter_query)
+
+    dasl = _JET_FIELD_RE.sub(_field, dasl)
     # [Unread] mapped to httpmail:read has INVERTED semantics: flip the literal.
     dasl = _UNREAD_CMP_RE.sub(
         lambda m: f"{m.group(1)} {m.group(2)} {'0' if m.group(3).upper() == 'TRUE' else '1'}",
@@ -127,6 +147,11 @@ def _jet_to_dasl(filter_query):
     dasl = _BOOL_CMP_RE.sub(
         lambda m: "1" if m.group(1).upper() == "TRUE" else "0", dasl
     )
+
+    # Restore the original literal text, untouched by the substitutions above.
+    for index, literal in enumerate(literals):
+        dasl = dasl.replace(_LITERAL_PLACEHOLDER.format(index), literal)
+
     return f"@SQL={dasl}"
 
 

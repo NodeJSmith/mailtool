@@ -112,6 +112,35 @@ class TestTranslateFilter:
             "LIKE '%IPM.Note%'"
         )
 
+    def test_bracketed_text_inside_like_literal_not_treated_as_field(self):
+        # '%[External]%' is a literal LIKE search pattern, not a [Field]
+        # reference — must not raise and must survive untouched.
+        result = translate_filter("[Subject] LIKE '%[External]%'")
+        assert result == (
+            '@SQL="urn:schemas:httpmail:subject" LIKE \'%[External]%\''
+        )
+
+    def test_true_false_text_inside_like_literal_not_mangled(self):
+        # '%TRUE%' is literal text to search for, not the TRUE keyword —
+        # must not be rewritten to '%1%'.
+        result = translate_filter("[Subject] LIKE '%TRUE%'")
+        assert result == '@SQL="urn:schemas:httpmail:subject" LIKE \'%TRUE%\''
+
+        result = translate_filter("[Subject] LIKE '%FALSE%'")
+        assert result == '@SQL="urn:schemas:httpmail:subject" LIKE \'%FALSE%\''
+
+    def test_literal_masking_does_not_block_real_unread_substitution(self):
+        # A literal containing bracketed text must be preserved verbatim
+        # while a real [Unread] = TRUE clause elsewhere in the same filter
+        # still gets translated and inverted normally.
+        result = translate_filter(
+            "[Subject] LIKE '%[External]%' AND [Unread] = TRUE"
+        )
+        assert result == (
+            '@SQL="urn:schemas:httpmail:subject" LIKE \'%[External]%\' '
+            'AND "urn:schemas:httpmail:read" = 0'
+        )
+
 
 # =============================================================================
 # Fakes
