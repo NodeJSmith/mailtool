@@ -94,6 +94,24 @@ def test_timestamp():
     return f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
 
+def delete_by_subject_prefix(folder, prefix):
+    """Delete every item in `folder` whose subject starts with `prefix`.
+
+    Outlook filters by subject (DASL LIKE) before Python sees anything, so the cost is
+    the number of matches rather than the folder size. Iterating a whole calendar item
+    by item over COM blocks Outlook's single UI thread for as long as it takes. The
+    matches are copied to a list before deleting, because deleting while iterating a
+    live Items collection skips items.
+    """
+    if folder is None:
+        return 0
+    query = f"@SQL=\"urn:schemas:httpmail:subject\" LIKE '{prefix}%'"
+    matches = list(folder.Items.Restrict(query))
+    for item in matches:
+        item.Delete()
+    return len(matches)
+
+
 @pytest.fixture
 def cleanup_helpers(bridge):
     """
@@ -104,80 +122,17 @@ def cleanup_helpers(bridge):
     - delete_calendar_by_prefix(prefix): Delete all calendar items with subject prefix
     - delete_tasks_by_prefix(prefix): Delete all tasks with subject prefix
     """
-    helpers = {}
-
-    def delete_drafts_by_prefix(prefix):
-        """Delete all draft emails matching the prefix"""
-        drafts = bridge.get_folder_by_name("Drafts") or bridge.get_inbox()
-        items = drafts.Items
-        items.Sort("[CreationTime]", False)  # Newest first
-
-        deleted_count = 0
-        for item in items:
-            try:
-                if (
-                    hasattr(item, "Subject")
-                    and item.Subject
-                    and item.Subject.startswith(prefix)
-                ):
-                    item.Delete()
-                    deleted_count += 1
-            except Exception:
-                pass
-
-        if deleted_count > 0:
-            print(f"  Cleanup: Deleted {deleted_count} draft(s)")
-        return deleted_count
-
-    def delete_calendar_by_prefix(prefix):
-        """Delete all calendar items matching the prefix"""
-        calendar = bridge.get_calendar()
-        items = calendar.Items
-
-        deleted_count = 0
-        for item in items:
-            try:
-                if (
-                    hasattr(item, "Subject")
-                    and item.Subject
-                    and item.Subject.startswith(prefix)
-                ):
-                    item.Delete()
-                    deleted_count += 1
-            except Exception:
-                pass
-
-        if deleted_count > 0:
-            print(f"  Cleanup: Deleted {deleted_count} calendar event(s)")
-        return deleted_count
-
-    def delete_tasks_by_prefix(prefix):
-        """Delete all tasks matching the prefix"""
-        tasks = bridge.get_tasks()
-        items = tasks.Items
-
-        deleted_count = 0
-        for item in items:
-            try:
-                if (
-                    hasattr(item, "Subject")
-                    and item.Subject
-                    and item.Subject.startswith(prefix)
-                ):
-                    item.Delete()
-                    deleted_count += 1
-            except Exception:
-                pass
-
-        if deleted_count > 0:
-            print(f"  Cleanup: Deleted {deleted_count} task(s)")
-        return deleted_count
-
-    helpers["delete_drafts_by_prefix"] = delete_drafts_by_prefix
-    helpers["delete_calendar_by_prefix"] = delete_calendar_by_prefix
-    helpers["delete_tasks_by_prefix"] = delete_tasks_by_prefix
-
-    return helpers
+    return {
+        "delete_drafts_by_prefix": lambda prefix: delete_by_subject_prefix(
+            bridge.get_folder_by_name("Drafts"), prefix
+        ),
+        "delete_calendar_by_prefix": lambda prefix: delete_by_subject_prefix(
+            bridge.get_calendar(), prefix
+        ),
+        "delete_tasks_by_prefix": lambda prefix: delete_by_subject_prefix(
+            bridge.get_tasks(), prefix
+        ),
+    }
 
     # Automatic cleanup of test artifacts is handled by individual tests
     # This fixture just provides the helpers
