@@ -157,7 +157,9 @@ def _jet_to_dasl(filter_query):
     dasl = _JET_FIELD_RE.sub(_field, dasl)
     # [Unread] mapped to httpmail:read has INVERTED semantics: flip the literal.
     dasl = _UNREAD_CMP_RE.sub(
-        lambda m: f"{m.group(1)} {m.group(2)} {'0' if m.group(3).upper() == 'TRUE' else '1'}",
+        lambda m: (
+            f"{m.group(1)} {m.group(2)} {'0' if m.group(3).upper() == 'TRUE' else '1'}"
+        ),
         dasl,
     )
     # Remaining TRUE/FALSE literals (HasAttachments etc.) become 1/0, which
@@ -242,7 +244,9 @@ def _folder_by_path(root, path_parts):
     return current
 
 
-def _find_folder_by_name(folder, target_name, max_depth, max_visited=FOLDER_SEARCH_MAX_VISITED):
+def _find_folder_by_name(
+    folder, target_name, max_depth, max_visited=FOLDER_SEARCH_MAX_VISITED
+):
     """Breadth-first, case-insensitive search for `target_name` among the
     descendants of `folder`, bounded to `max_depth` levels below it and
     `max_visited` folders visited in total.
@@ -627,7 +631,10 @@ class OutlookBridge:
         root = self._get_root()
         if root:
             found = _find_folder_by_name(
-                root, target_name, FOLDER_SEARCH_MAX_DEPTH, max_visited=FOLDER_SEARCH_MAX_VISITED
+                root,
+                target_name,
+                FOLDER_SEARCH_MAX_DEPTH,
+                max_visited=FOLDER_SEARCH_MAX_VISITED,
             )
             if found:
                 return found
@@ -642,7 +649,10 @@ class OutlookBridge:
             except Exception:
                 continue
             found = _find_folder_by_name(
-                parent, target_name, FOLDER_SEARCH_MAX_DEPTH, max_visited=FOLDER_SEARCH_MAX_VISITED
+                parent,
+                target_name,
+                FOLDER_SEARCH_MAX_DEPTH,
+                max_visited=FOLDER_SEARCH_MAX_VISITED,
             )
             if found:
                 return found
