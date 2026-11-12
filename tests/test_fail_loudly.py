@@ -501,3 +501,28 @@ class TestCli:
 
         assert code == 0
         assert json.loads(out) == {"status": "success", "message": "Email deleted"}
+
+
+class TestEditTaskCompleteFlag:
+    @pytest.mark.parametrize(("raw", "expected"), [("false", False), ("true", True)])
+    def test_complete_flag_is_parsed_as_a_boolean(self, run_cli, raw, expected):
+        seen = {}
+
+        def edit_task(*args):
+            seen["complete"] = args[-1]
+            return True
+
+        code, _, _ = run_cli(
+            ["edit-task", "--id", "x", "--complete", raw], edit_task=edit_task
+        )
+
+        assert code == 0
+        assert seen["complete"] is expected
+
+    def test_invalid_value_is_a_usage_error(self, run_cli):
+        code, _, _ = run_cli(
+            ["edit-task", "--id", "x", "--complete", "maybe"],
+            edit_task=lambda *_a: True,
+        )
+
+        assert code == 2

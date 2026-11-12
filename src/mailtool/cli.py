@@ -75,6 +75,16 @@ def _check_pywin32() -> None:
         sys.exit(1)
 
 
+def parse_bool(value: str) -> bool:
+    """argparse type for true/false flags (type=bool would make "false" True)."""
+    lowered = value.strip().lower()
+    if lowered in ("true", "yes", "1"):
+        return True
+    if lowered in ("false", "no", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got {value!r}")
+
+
 def main() -> None:
     """
     Main CLI entry point for mailtool.
@@ -315,7 +325,7 @@ def main() -> None:
         "--percent", type=int, choices=range(0, 101), help="Percent complete (0-100)"
     )
     edit_task_parser.add_argument(
-        "--complete", type=bool, help="Mark complete/incomplete (true/false)"
+        "--complete", type=parse_bool, help="Mark complete/incomplete (true/false)"
     )
 
     # Complete task command
