@@ -1,0 +1,84 @@
+# Configuration file for prek, a fast Rust-based Git hook manager.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+default_install_hook_types = ["pre-commit", "pre-push"]
+
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "trailing-whitespace" },
+    { id = "end-of-file-fixer" },
+    { id = "mixed-line-ending" },
+    { id = "check-case-conflict" },
+    { id = "check-shebang-scripts-are-executable" },
+    { id = "check-merge-conflict" },
+    { id = "check-yaml", args = ["--unsafe"] },
+]
+
+# Hooks not yet reimplemented as builtins
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [
+    { id = "check-builtin-literals" },
+    { id = "debug-statements" },
+]
+
+[[repos]]
+repo = "https://github.com/crate-ci/typos"
+rev = "v1.52.0"
+hooks = [
+    { id = "typos", args = ["--force-exclude"], require_serial = true },
+]
+
+[[repos]]
+repo = "https://github.com/gitleaks/gitleaks"
+rev = "v8.30.1"
+hooks = [
+    # The upstream hook scans only the index, so at pre-push or in CI's clean checkout it
+    # passes having scanned nothing; keep it to pre-commit.
+    { id = "gitleaks", stages = ["pre-commit"] },
+]
+
+# Python tools locked in uv.lock run through `uv run`, so the hook and a hand-run
+# `uv run <tool>` always use the same version.
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "ruff-check"
+name = "ruff check"
+language = "system"
+entry = "uv run ruff check --fix --force-exclude --show-fixes"
+require_serial = true
+types_or = ["python", "pyi"]
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "ruff format"
+language = "system"
+entry = "uv run ruff format --force-exclude"
+require_serial = true
+types_or = ["python", "pyi"]
+
+[[repos.hooks]]
+id = "no-mypy-ignore"
+name = 'Ban "type: ignore" comments (use pyright)'
+language = "pygrep"
+types = ["python"]
+entry = "# type: ignore"
+
+[[repos.hooks]]
+id = "no-future-annotations"
+name = "Ban from __future__ import annotations (breaks Pydantic)"
+language = "pygrep"
+types = ["python"]
+entry = "^from __future__ import annotations"
+
+[[repos.hooks]]
+id = "zizmor"
+name = "zizmor (GitHub Actions security)"
+language = "system"
+entry = "env -u GH_TOKEN -u GITHUB_TOKEN uvx zizmor@1.26.1 --offline"
+files = '^\.github/workflows/'

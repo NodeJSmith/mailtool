@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Outlook COM Automation Bridge
 Runs on Windows, callable from WSL2
