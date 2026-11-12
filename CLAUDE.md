@@ -1,3 +1,9 @@
+---
+audience: personal tool
+developers: solo
+data-sensitivity: internal
+---
+
 # Mailtool: Outlook COM Automation Bridge
 
 A WSL2-to-Windows bridge for Outlook automation via COM, optimized for AI agent integration.
