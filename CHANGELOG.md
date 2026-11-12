@@ -26,6 +26,12 @@ All notable changes to this project are documented here. The format is based on
   known bugs (resources dropping newer email metadata, an uncapped `get_emails` batch that
   could block Outlook's COM apartment). mailtool is now the CLI and library only.
 
+### Fixed
+
+- A malformed entry ID (a string that isn't an Outlook EntryID at all) returns `None` like
+  any other unknown ID. Outlook reports it as `E_INVALIDARG`, which `get_item_by_id` was
+  raising as `MailtoolError`.
+
 ## [0.12.0] - 2026-08-18
 
  Triage follow-up release: every fix below was found by running an agent-driven
