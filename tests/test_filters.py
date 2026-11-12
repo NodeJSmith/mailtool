@@ -113,10 +113,7 @@ class TestTranslateFilter:
         assert result.startswith("@SQL=")
         # Proptag, not urn:schemas:httpmail:senderemail — see
         # test_senderemailaddress_mapped_via_proptag for why.
-        assert (
-            '"http://schemas.microsoft.com/mapi/proptag/0x0C1F001F" LIKE'
-            in result
-        )
+        assert '"http://schemas.microsoft.com/mapi/proptag/0x0C1F001F" LIKE' in result
         assert '"urn:schemas:httpmail:date" >= ' in result
 
     def test_senderemailaddress_mapped_via_proptag(self):
@@ -144,28 +141,24 @@ class TestTranslateFilter:
         # '%[External]%' is a literal LIKE search pattern, not a [Field]
         # reference — must not raise and must survive untouched.
         result = translate_filter("[Subject] LIKE '%[External]%'")
-        assert result == (
-            '@SQL="urn:schemas:httpmail:subject" LIKE \'%[External]%\''
-        )
+        assert result == ("@SQL=\"urn:schemas:httpmail:subject\" LIKE '%[External]%'")
 
     def test_true_false_text_inside_like_literal_not_mangled(self):
         # '%TRUE%' is literal text to search for, not the TRUE keyword —
         # must not be rewritten to '%1%'.
         result = translate_filter("[Subject] LIKE '%TRUE%'")
-        assert result == '@SQL="urn:schemas:httpmail:subject" LIKE \'%TRUE%\''
+        assert result == "@SQL=\"urn:schemas:httpmail:subject\" LIKE '%TRUE%'"
 
         result = translate_filter("[Subject] LIKE '%FALSE%'")
-        assert result == '@SQL="urn:schemas:httpmail:subject" LIKE \'%FALSE%\''
+        assert result == "@SQL=\"urn:schemas:httpmail:subject\" LIKE '%FALSE%'"
 
     def test_literal_masking_does_not_block_real_unread_substitution(self):
         # A literal containing bracketed text must be preserved verbatim
         # while a real [Unread] = TRUE clause elsewhere in the same filter
         # still gets translated and inverted normally.
-        result = translate_filter(
-            "[Subject] LIKE '%[External]%' AND [Unread] = TRUE"
-        )
+        result = translate_filter("[Subject] LIKE '%[External]%' AND [Unread] = TRUE")
         assert result == (
-            '@SQL="urn:schemas:httpmail:subject" LIKE \'%[External]%\' '
+            "@SQL=\"urn:schemas:httpmail:subject\" LIKE '%[External]%' "
             'AND "urn:schemas:httpmail:read" = 0'
         )
 

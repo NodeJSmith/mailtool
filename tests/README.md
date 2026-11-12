@@ -104,7 +104,7 @@ def test_something(bridge, cleanup_helpers, test_timestamp):
     # Create test items...
     # Test passes or fails...
     # Cleanup runs automatically
-    cleanup_helpers['delete_drafts_by_prefix']("[TEST] ")
+    cleanup_helpers["delete_drafts_by_prefix"]("[TEST] ")
 ```
 
 ### Manual Cleanup
@@ -174,7 +174,7 @@ class TestMyNewFeature:
         assert result is not None
 
         # Cleanup
-        cleanup_helpers['delete_drafts_by_prefix']("[TEST] ")
+        cleanup_helpers["delete_drafts_by_prefix"]("[TEST] ")
 ```
 
 ## Continuous Integration

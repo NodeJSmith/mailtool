@@ -1,0 +1,8 @@
+[files]
+extend-exclude = [
+    "*.lock",
+]
+
+[default]
+# "ANDed" (a filter clause joined with AND) splits into "AN" + "Ded".
+extend-ignore-re = ["ANDed"]
