@@ -18,6 +18,8 @@ class FakeComError(Exception):
 
 
 class FakeAppointment:
+    Class = 26
+
     def __init__(self, entry_id):
         self.EntryID = entry_id
         self.Subject = "old"
@@ -74,6 +76,17 @@ def test_edit_appointment_unknown_id_returns_false():
     bridge = make_bridge({})
 
     assert bridge.edit_appointment("missing", subject="new") is False
+
+
+def test_edit_appointment_rejects_other_item_types():
+    email = FakeAppointment("mail-1")
+    email.Class = 43  # olMail
+    bridge = make_bridge({"mail-1": email})
+
+    assert bridge.edit_appointment("mail-1", subject="new") is False
+
+    assert email.Subject == "old"
+    assert email.saved is False
 
 
 class RaisingObj:

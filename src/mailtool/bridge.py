@@ -75,6 +75,10 @@ FOLDER_SEARCH_MAX_DEPTH = 8
 # call on the main thread. This caps the worst case regardless of shape.
 FOLDER_SEARCH_MAX_VISITED = 500
 
+# Outlook OlObjectClass values used to check that an EntryID points at the
+# kind of item the caller expects.
+OL_APPOINTMENT = 26
+
 # Outlook OlResponseStatus enum.
 RESPONSE_STATUS_LABELS = {
     0: "None",
@@ -1528,11 +1532,13 @@ class OutlookBridge:
             body: New body (optional)
 
         Returns:
-            True if successful
+            True if successful, False if the ID is not an appointment
         """
         try:
             item = self.get_item_by_id(entry_id)
-            if item is None:
+            # An EntryID for another item type (an email's, say) must not be
+            # edited as if it were an appointment.
+            if item is None or self._safe_get_attr(item, "Class") != OL_APPOINTMENT:
                 return False
             if required_attendees:
                 item.RequiredAttendees = required_attendees
