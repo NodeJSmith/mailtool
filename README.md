@@ -4,10 +4,6 @@ A Python library and CLI for reading and acting on Outlook (classic) email, cale
 tasks through Windows COM automation. It runs on Windows, next to a running Outlook, and is
 called from WSL2 through Windows interop (`mailtool.exe`).
 
-Originally forked from [utsmok/mailtool](https://github.com/utsmok/mailtool); now maintained
-independently. The MCP server the upstream project shipped has been removed; this repo is
-the CLI and library only.
-
 ## Install
 
 On Windows, with [uv](https://github.com/astral-sh/uv):
@@ -55,3 +51,10 @@ uv run ruff format .
 ```
 
 See [CLAUDE.md](CLAUDE.md) for architecture notes and design decisions.
+
+## About this fork
+
+This started as a fork of [utsmok/mailtool](https://github.com/utsmok/mailtool) and is
+maintained for my own use. It isn't published to PyPI (the `mailtool` package there is the
+upstream project's), and the upstream MCP server has been removed, leaving the CLI and
+library only.
