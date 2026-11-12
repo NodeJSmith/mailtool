@@ -21,7 +21,6 @@ import contextlib
 import os
 import re
 import sys
-import traceback
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -309,6 +308,35 @@ def _find_folder_by_name(
     return None
 
 
+class MailtoolError(RuntimeError):
+    """An Outlook/COM operation failed.
+
+    Raised instead of returning an empty result or a False sentinel, so a
+    failure can never be mistaken for "nothing found". A fetch by an entry ID
+    that doesn't exist is not a failure: those methods return None.
+    """
+
+
+@contextlib.contextmanager
+def _com_operation(action):
+    """Re-raise any failure inside the block as MailtoolError("<action> failed: ...").
+
+    MailtoolError raised inside the block passes through unchanged so its
+    more specific message isn't wrapped twice.
+    """
+    try:
+        yield
+    except MailtoolError:
+        raise
+    except Exception as e:
+        raise MailtoolError(f"{action} failed: {e}") from e
+
+
+def _warn_skipped(what, error):
+    """Report one item skipped inside a list loop; the call as a whole goes on."""
+    print(f"Warning: skipped {what}: {error}", file=sys.stderr)
+
+
 class OutlookBridge:
     """Bridge to Outlook application via COM"""
 
@@ -346,16 +374,12 @@ class OutlookBridge:
             # Outlook might not be running - try to launch it
             try:
                 self.outlook = win32com.client.Dispatch("Outlook.Application")
-            except Exception:
-                print("Error: Could not connect to or launch Outlook.", file=sys.stderr)
-                print(f"Details: {e}", file=sys.stderr)
-                # output full traceback
-                print(
-                    "Hint: Make sure Outlook is installed and you can launch it manually.",
-                    file=sys.stderr,
-                )
-                traceback.print_exc()
-                sys.exit(1)
+            except Exception as launch_error:
+                raise MailtoolError(
+                    "Could not connect to or launch Outlook "
+                    f"(attach failed: {e}; launch failed: {launch_error}). "
+                    "Make sure Outlook is installed and you can launch it manually."
+                ) from launch_error
 
         self.namespace = self.outlook.GetNamespace("MAPI")
         # Default account name and root folder (set by set_default_account or via init param)
@@ -364,8 +388,7 @@ class OutlookBridge:
 
         # If provided, attempt to set the default account/store on init
         if default_account:
-            with contextlib.suppress(Exception):
-                self.set_default_account(default_account)
+            self.set_default_account(default_account)
 
     # -- Helper methods for account/folder resolution -----------------
     def _find_root_by_name(self, acc_name: str):
@@ -462,21 +485,32 @@ class OutlookBridge:
             acc_name: Account name to set as default
 
         Returns:
-            True if successful, False otherwise
+            True if successful
+
+        Raises:
+            MailtoolError: If no account with that name exists.
         """
         root = self._find_root_by_name(acc_name)
         if not root:
-            return False
-        try:
-            # Set attributes for bridge usage
-            self.default_account_name = acc_name
-            self.default_root_folder = root
-            # Also set DefaultStore to help other COM calls that rely on it
-            with contextlib.suppress(Exception):
-                self.namespace.DefaultStore = root.Store
-            return True
-        except Exception:
-            return False
+            raise MailtoolError(f"Account not found: {acc_name}")
+        self.default_account_name = acc_name
+        self.default_root_folder = root
+        # Best effort: DefaultStore helps other COM calls that rely on it, but
+        # the root folder above is what the bridge itself uses.
+        with contextlib.suppress(Exception):
+            self.namespace.DefaultStore = root.Store
+        return True
+
+    def _require_item(self, entry_id, kind="Item"):
+        """Return the item for entry_id, raising MailtoolError if it doesn't exist.
+
+        For mutators: acting on a missing item is a failure, unlike a fetch,
+        which returns None.
+        """
+        item = self.get_item_by_id(entry_id)
+        if item is None:
+            raise MailtoolError(f"{kind} not found: {entry_id}")
+        return item
 
     def get_inbox(self):
         """Get the inbox folder"""
@@ -509,6 +543,8 @@ class OutlookBridge:
         Returns:
             Dict with account names as keys and list of folder info dicts as values
 
+        Raises:
+            MailtoolError: If reading a folder's details fails.
         """
 
         def retrieve_folder_details(folder, parent_folder, depth):
@@ -543,7 +579,10 @@ class OutlookBridge:
                 print(f"Finished listing accounts. Total accounts: {i - 1}")
                 break  # No more accounts
 
-            final[parent_folder.Name] = retrieve_folder_details(parent_folder, None, 0)
+            with _com_operation(f"list folders for {parent_folder.Name}"):
+                final[parent_folder.Name] = retrieve_folder_details(
+                    parent_folder, None, 0
+                )
 
         return final
 
@@ -687,35 +726,33 @@ class OutlookBridge:
 
     def _resolve_folder(self, folder):
         """
-        Resolve `folder` to a mail folder, warning to stderr and falling
-        back to Inbox when it can't be found.
+        Resolve `folder` to a mail folder.
 
-        "resolve folder by name, warn and fall back to Inbox if missing"
-        is needed by every caller that accepts a folder name (list_emails,
-        search_by_sender, get_inbox_stats) — centralized here so the
-        warning text and fallback behavior can't drift between them.
+        Needed by every caller that accepts a folder name (list_emails,
+        search_by_sender, get_inbox_stats) — centralized here so the lookup
+        and its error can't drift between them. A missing folder is an error
+        rather than a silent fallback to Inbox, which would report another
+        folder's mail as if it were the one asked for.
 
         Args:
             folder: Folder name (or "Inbox")
 
         Returns:
-            (mail_folder, resolved_name) — resolved_name is "Inbox" when a
-            fallback occurred, not the originally requested name, so
-            callers that report the folder name back to the caller don't
-            attribute results to a folder that was never queried.
+            (mail_folder, folder_name)
+
+        Raises:
+            MailtoolError: If the folder (or the Inbox) can't be found.
         """
         if folder == "Inbox":
-            return self.get_inbox(), "Inbox"
+            inbox = self.get_inbox()
+            if inbox is None:
+                raise MailtoolError("Inbox folder not found")
+            return inbox, "Inbox"
 
         mail_folder = self.get_folder_by_name(folder)
-        if mail_folder:
-            return mail_folder, folder
-
-        print(
-            f"Warning: Folder '{folder}' not found, falling back to Inbox",
-            file=sys.stderr,
-        )
-        return self.get_inbox(), "Inbox"
+        if mail_folder is None:
+            raise MailtoolError(f"Folder not found: {folder}")
+        return mail_folder, folder
 
     def get_item_by_id(self, entry_id):
         """
@@ -942,37 +979,39 @@ class OutlookBridge:
                 notifications, post items, etc.)
 
         Returns:
-            List of email dictionaries
+            List of email dictionaries (empty only when the folder has no
+            matching mail)
+
+        Raises:
+            MailtoolError: If the folder can't be found or the COM calls fail.
         """
         inbox, _ = self._resolve_folder(folder)
 
-        if inbox is None:
-            return []
+        with _com_operation(f"list emails in {folder}"):
+            items = inbox.Items
 
-        items = inbox.Items
+            # Filter to real emails (IPM.Note*) unless the caller opts out.
+            if not include_non_mail:
+                # Restrict can fail on unusual folders; fall back to unfiltered.
+                with contextlib.suppress(Exception):
+                    items = items.Restrict(MAIL_ONLY_FILTER)
 
-        # Filter to real emails (IPM.Note*) unless the caller opts out.
-        if not include_non_mail:
-            # Restrict can fail on unusual folders; fall back to unfiltered.
-            with contextlib.suppress(Exception):
-                items = items.Restrict(MAIL_ONLY_FILTER)
+            # Sort by received time, most recent first
+            items.Sort("[ReceivedTime]", True)
 
-        # Sort by received time, most recent first
-        items.Sort("[ReceivedTime]", True)
+            emails = []
+            count = 0
+            for item in items:
+                if count >= limit:
+                    break
+                try:
+                    emails.append(self._mail_item_to_dict(item, include_body=False))
+                    count += 1
+                except Exception as e:
+                    # One unreadable item must not sink the whole listing.
+                    _warn_skipped("an unreadable email", e)
 
-        emails = []
-        count = 0
-        for item in items:
-            if count >= limit:
-                break
-            try:
-                emails.append(self._mail_item_to_dict(item, include_body=False))
-                count += 1
-            except Exception:
-                # Skip items that can't be accessed
-                continue
-
-        return emails
+            return emails
 
     def get_email_body(self, entry_id):
         """
@@ -988,14 +1027,15 @@ class OutlookBridge:
 
         Returns:
             Email dictionary with body, or None if the item is not found
+
+        Raises:
+            MailtoolError: If the item exists but can't be read.
         """
         item = self.get_item_by_id(entry_id)
         if item is None:
             return None
-        try:
+        with _com_operation(f"read email {entry_id}"):
             return self._mail_item_to_dict(item, include_body=True)
-        except Exception:
-            return None
 
     def get_email_bodies(self, entry_ids, include_body=True):
         """
@@ -1009,20 +1049,18 @@ class OutlookBridge:
 
         Returns:
             List of email dictionaries for items that were found (missing IDs are
-            silently omitted)
+            silently omitted; an item that exists but can't be read is skipped
+            with a warning on stderr)
         """
         results = []
         for entry_id in entry_ids or []:
-            try:
-                item = self.get_item_by_id(entry_id)
-            except Exception:
-                item = None
+            item = self.get_item_by_id(entry_id)
             if item is None:
                 continue
             try:
                 results.append(self._mail_item_to_dict(item, include_body=include_body))
-            except Exception:
-                continue
+            except Exception as e:
+                _warn_skipped(f"unreadable email {entry_id}", e)
         return results
 
     @staticmethod
@@ -1095,11 +1133,17 @@ class OutlookBridge:
             List of event dictionaries
 
         Raises:
-            RuntimeError: If the calendar folder can't be found.
+            MailtoolError: If the calendar folder can't be found or the COM
+                calls fail.
         """
         calendar = self.get_calendar()
         if calendar is None:
-            raise RuntimeError("Calendar folder not found")
+            raise MailtoolError("Calendar folder not found")
+        with _com_operation("list calendar events"):
+            return self.collect_calendar_events(calendar, days, all_events)
+
+    def collect_calendar_events(self, calendar, days, all_events):
+        """Run the restricted calendar query and build the event dicts."""
         items = calendar.Items
 
         # Canonical order per Microsoft docs: Sort -> IncludeRecurrences ->
@@ -1178,9 +1222,9 @@ class OutlookBridge:
                     ),
                 }
                 events.append(event)
-            except (Exception, BaseException):
-                # Skip items that cause errors (including COM fatal errors)
-                continue
+            except Exception as e:
+                # One bad occurrence must not sink the whole listing.
+                _warn_skipped("an unreadable calendar item", e)
 
         return events
 
@@ -1209,9 +1253,12 @@ class OutlookBridge:
             save_draft: If True, save to Drafts instead of sending
 
         Returns:
-            Draft entry ID if saved, True if sent, False if failed
+            Draft entry ID if saved, True if sent
+
+        Raises:
+            MailtoolError: If the email can't be built, attached, saved or sent.
         """
-        try:
+        with _com_operation("send email"):
             # If saving to drafts, create the mail in the default account's Drafts folder when available
             root = self._get_root()
             mail = None
@@ -1244,11 +1291,10 @@ class OutlookBridge:
             if bcc:
                 mail.BCC = bcc
 
-            # Add attachments
+            # Add attachments (a missing attachment must not be sent without it)
             if file_paths:
                 for file_path in file_paths:
-                    with contextlib.suppress(Exception):
-                        mail.Attachments.Add(file_path)
+                    mail.Attachments.Add(file_path)
 
             # Ensure sending uses the default account when set
             try:
@@ -1283,9 +1329,6 @@ class OutlookBridge:
             else:
                 mail.Send()
                 return True
-        except Exception as e:
-            print(f"Error sending email: {e}", file=sys.stderr)
-            return False
 
     def reply_email(self, entry_id, body, reply_all=False):
         """
@@ -1297,31 +1340,29 @@ class OutlookBridge:
             reply_all: True to reply all, False to reply sender only
 
         Returns:
-            True if successful
+            True if sent
+
+        Raises:
+            MailtoolError: If the email doesn't exist or the reply can't be sent.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
+        item = self._require_item(entry_id, "Email")
+        with _com_operation("reply to email"):
+            if reply_all:
+                reply = item.ReplyAll()
+            else:
+                reply = item.Reply()
+            reply.Body = body
+            # try to enforce default send account
             try:
-                if reply_all:
-                    reply = item.ReplyAll()
-                else:
-                    reply = item.Reply()
-                reply.Body = body
-                # try to enforce default send account
-                try:
-                    if self.default_account_name:
-                        acc = self._find_account_by_name(self.default_account_name)
-                        if acc:
-                            with contextlib.suppress(Exception):
-                                reply.SendUsingAccount = acc
-                except Exception:
-                    pass
-                reply.Send()
-                return True
-            except Exception as e:
-                print(f"Error replying to email: {e}", file=sys.stderr)
-                return False
-        return False
+                if self.default_account_name:
+                    acc = self._find_account_by_name(self.default_account_name)
+                    if acc:
+                        with contextlib.suppress(Exception):
+                            reply.SendUsingAccount = acc
+            except Exception:
+                pass
+            reply.Send()
+            return True
 
     def forward_email(self, entry_id, to, body=""):
         """
@@ -1333,29 +1374,27 @@ class OutlookBridge:
             body: Optional additional body text
 
         Returns:
-            True if successful
+            True if sent
+
+        Raises:
+            MailtoolError: If the email doesn't exist or can't be forwarded.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
+        item = self._require_item(entry_id, "Email")
+        with _com_operation("forward email"):
+            forward = item.Forward()
+            forward.To = to
+            if body:
+                forward.Body = body + "\n\n" + forward.Body
             try:
-                forward = item.Forward()
-                forward.To = to
-                if body:
-                    forward.Body = body + "\n\n" + forward.Body
-                try:
-                    if self.default_account_name:
-                        acc = self._find_account_by_name(self.default_account_name)
-                        if acc:
-                            with contextlib.suppress(Exception):
-                                forward.SendUsingAccount = acc
-                except Exception:
-                    pass
-                forward.Send()
-                return True
-            except Exception as e:
-                print(f"Error forwarding email: {e}", file=sys.stderr)
-                return False
-        return False
+                if self.default_account_name:
+                    acc = self._find_account_by_name(self.default_account_name)
+                    if acc:
+                        with contextlib.suppress(Exception):
+                            forward.SendUsingAccount = acc
+            except Exception:
+                pass
+            forward.Send()
+            return True
 
     def mark_email_read(self, entry_id, unread=False):
         """
@@ -1367,16 +1406,15 @@ class OutlookBridge:
 
         Returns:
             True if successful
+
+        Raises:
+            MailtoolError: If the email doesn't exist or can't be updated.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
-            try:
-                item.Unread = unread
-                item.Save()
-                return True
-            except Exception:
-                return False
-        return False
+        item = self._require_item(entry_id, "Email")
+        with _com_operation("mark email"):
+            item.Unread = unread
+            item.Save()
+            return True
 
     def move_email(self, entry_id, folder_name):
         """
@@ -1388,22 +1426,18 @@ class OutlookBridge:
 
         Returns:
             True if successful
+
+        Raises:
+            MailtoolError: If the email or the target folder doesn't exist, or
+                the move fails.
         """
-        try:
-            item = self.get_item_by_id(entry_id)
-            if not item:
-                return False
-
-            target_folder = self.get_folder_by_name(folder_name)
-            if not target_folder:
-                print(f"Error: Folder '{folder_name}' not found", file=sys.stderr)
-                return False
-
+        item = self._require_item(entry_id, "Email")
+        target_folder = self.get_folder_by_name(folder_name)
+        if target_folder is None:
+            raise MailtoolError(f"Folder not found: {folder_name}")
+        with _com_operation("move email"):
             item.Move(target_folder)
             return True
-        except Exception as e:
-            print(f"Error moving email: {e}", file=sys.stderr)
-            return False
 
     def delete_email(self, entry_id):
         """
@@ -1414,15 +1448,14 @@ class OutlookBridge:
 
         Returns:
             True if successful
+
+        Raises:
+            MailtoolError: If the email doesn't exist or can't be deleted.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
-            try:
-                item.Delete()
-                return True
-            except Exception:
-                return False
-        return False
+        item = self._require_item(entry_id, "Email")
+        with _com_operation("delete email"):
+            item.Delete()
+            return True
 
     def download_attachments(self, entry_id, download_dir):
         """
@@ -1433,14 +1466,18 @@ class OutlookBridge:
             download_dir: Directory to save attachments
 
         Returns:
-            List of downloaded file paths
-        """
-        item = self.get_item_by_id(entry_id)
-        if not item or item.Attachments.Count == 0:
-            return []
+            List of downloaded file paths (empty when the email has no
+            attachments)
 
-        downloaded = []
-        try:
+        Raises:
+            MailtoolError: If the email doesn't exist or a download fails.
+        """
+        item = self._require_item(entry_id, "Email")
+        with _com_operation("download attachments"):
+            if item.Attachments.Count == 0:
+                return []
+
+            downloaded = []
             os.makedirs(download_dir, exist_ok=True)
 
             for i in range(item.Attachments.Count):
@@ -1450,9 +1487,6 @@ class OutlookBridge:
                 attachment.SaveAsFile(filepath)
                 downloaded.append(filepath)
             return downloaded
-        except Exception as e:
-            print(f"Error downloading attachments: {e}", file=sys.stderr)
-            return []
 
     def create_appointment(
         self,
@@ -1479,9 +1513,12 @@ class OutlookBridge:
             optional_attendees: Semicolon-separated list of optional attendees
 
         Returns:
-            Appointment entry ID if successful
+            Appointment entry ID
+
+        Raises:
+            MailtoolError: If the appointment can't be created or saved.
         """
-        try:
+        with _com_operation("create appointment"):
             # Prefer creating the appointment in the default account's Calendar folder
             calendar = self.get_calendar()
             if calendar:
@@ -1503,9 +1540,6 @@ class OutlookBridge:
                 appointment.OptionalAttendees = optional_attendees
             appointment.Save()
             return appointment.EntryID
-        except Exception as e:
-            print(f"Error creating appointment: {e}", file=sys.stderr)
-            return None
 
     def edit_appointment(
         self,
@@ -1532,14 +1566,13 @@ class OutlookBridge:
             body: New body (optional)
 
         Returns:
-            True if successful, False if the ID is not an appointment
+            True if successful
+
+        Raises:
+            MailtoolError: If the appointment doesn't exist or can't be saved.
         """
-        try:
-            item = self.get_item_by_id(entry_id)
-            # An EntryID for another item type (an email's, say) must not be
-            # edited as if it were an appointment.
-            if item is None or self._safe_get_attr(item, "Class") != OL_APPOINTMENT:
-                return False
+        item = self._require_item(entry_id, "Appointment")
+        with _com_operation("edit appointment"):
             if required_attendees:
                 item.RequiredAttendees = required_attendees
             if optional_attendees:
@@ -1556,9 +1589,6 @@ class OutlookBridge:
                 item.Body = body
             item.Save()
             return True
-        except Exception as e:
-            print(f"Error editing appointment: {e}", file=sys.stderr)
-            return False
 
     def get_appointment(self, entry_id):
         """
@@ -1568,11 +1598,14 @@ class OutlookBridge:
             entry_id: Appointment entry ID
 
         Returns:
-            Appointment dictionary with full details
+            Appointment dictionary with full details, or None if not found
+
+        Raises:
+            MailtoolError: If the appointment exists but can't be read.
         """
         item = self.get_item_by_id(entry_id)
         if item:
-            try:
+            with _com_operation("read appointment"):
                 required_attendees = (
                     item.RequiredAttendees if hasattr(item, "RequiredAttendees") else ""
                 )
@@ -1611,8 +1644,6 @@ class OutlookBridge:
                     if hasattr(item, "ResponseRequested")
                     else False,
                 }
-            except Exception:
-                pass
         return None
 
     def respond_to_meeting(self, entry_id, response):
@@ -1624,23 +1655,27 @@ class OutlookBridge:
             response: Response - "accept", "decline", "tentative"
 
         Returns:
-            True if successful
+            True if the response was sent
+
+        Raises:
+            MailtoolError: If the meeting doesn't exist, the response isn't one
+                of accept/decline/tentative, or sending it fails.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
-            try:
-                response_map = {
-                    "accept": 3,  # olResponseAccepted
-                    "decline": 4,  # olResponseDeclined
-                    "tentative": 2,  # olResponseTentative
-                }
-                if response.lower() in response_map:
-                    item.Response(response_map[response.lower()])
-                    item.Send()
-                    return True
-            except Exception:
-                pass
-        return False
+        response_map = {
+            "accept": 3,  # olResponseAccepted
+            "decline": 4,  # olResponseDeclined
+            "tentative": 2,  # olResponseTentative
+        }
+        if response.lower() not in response_map:
+            raise MailtoolError(
+                f"Unknown meeting response '{response}' "
+                f"(expected one of: {', '.join(response_map)})"
+            )
+        item = self._require_item(entry_id, "Meeting")
+        with _com_operation("respond to meeting"):
+            item.Response(response_map[response.lower()])
+            item.Send()
+            return True
 
     def delete_appointment(self, entry_id):
         """
@@ -1651,15 +1686,14 @@ class OutlookBridge:
 
         Returns:
             True if successful
+
+        Raises:
+            MailtoolError: If the appointment doesn't exist or can't be deleted.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
-            try:
-                item.Delete()
-                return True
-            except Exception:
-                pass
-        return False
+        item = self._require_item(entry_id, "Appointment")
+        with _com_operation("delete appointment"):
+            item.Delete()
+            return True
 
     def list_tasks(self, include_completed=False):
         """
@@ -1672,11 +1706,17 @@ class OutlookBridge:
             List of task dictionaries
 
         Raises:
-            RuntimeError: If the tasks folder can't be found.
+            MailtoolError: If the tasks folder can't be found or the COM calls
+                fail.
         """
         tasks_folder = self.get_tasks()
         if tasks_folder is None:
-            raise RuntimeError("Tasks folder not found")
+            raise MailtoolError("Tasks folder not found")
+        with _com_operation("list tasks"):
+            return self.collect_tasks(tasks_folder, include_completed)
+
+    def collect_tasks(self, tasks_folder, include_completed):
+        """Iterate the Tasks folder and build the task dicts."""
         items = tasks_folder.Items
 
         tasks = []
@@ -1705,8 +1745,9 @@ class OutlookBridge:
                     else 0,
                 }
                 tasks.append(task)
-            except Exception:
-                continue
+            except Exception as e:
+                # One unreadable task must not sink the whole listing.
+                _warn_skipped("an unreadable task", e)
 
         return tasks
 
@@ -1730,9 +1771,12 @@ class OutlookBridge:
             importance: 0=Low, 1=Normal, 2=High
 
         Returns:
-            Task entry ID if successful
+            Task entry ID
+
+        Raises:
+            MailtoolError: If the task can't be created or saved.
         """
-        try:
+        with _com_operation("create task"):
             # Prefer creating the task in the default account's Tasks folder
             tasks_folder = self.get_tasks()
             if tasks_folder:
@@ -1752,9 +1796,6 @@ class OutlookBridge:
             task.Importance = importance
             task.Save()
             return task.EntryID
-        except Exception as e:
-            print(f"Error creating task: {e}", file=sys.stderr)
-            return None
 
     def get_task(self, entry_id):
         """
@@ -1764,11 +1805,14 @@ class OutlookBridge:
             entry_id: Task entry ID
 
         Returns:
-            Task dictionary with full details
+            Task dictionary with full details, or None if not found
+
+        Raises:
+            MailtoolError: If the task exists but can't be read.
         """
         item = self.get_item_by_id(entry_id)
         if item:
-            try:
+            with _com_operation("read task"):
                 return {
                     "entry_id": item.EntryID,
                     "subject": item.Subject
@@ -1787,8 +1831,6 @@ class OutlookBridge:
                     if hasattr(item, "PercentComplete")
                     else 0,
                 }
-            except Exception:
-                pass
         return None
 
     def edit_task(
@@ -1815,45 +1857,43 @@ class OutlookBridge:
 
         Returns:
             True if successful
+
+        Raises:
+            MailtoolError: If the task doesn't exist or can't be saved.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
-            try:
-                if subject:
-                    item.Subject = subject
-                if body is not None:
-                    item.Body = body
-                if due_date:
-                    # Use noon to avoid timezone boundary issues
-                    item.DueDate = datetime.strptime(
-                        f"{due_date} 12:00:00", "%Y-%m-%d %H:%M:%S"
-                    )
-                if importance is not None:
-                    item.Importance = importance
-                if percent_complete is not None:
-                    item.PercentComplete = percent_complete
-                    # Update status based on percent_complete
-                    if percent_complete == 100:
-                        item.Status = 2  # Complete
-                        item.Complete = True
-                    elif percent_complete == 0:
-                        item.Status = 0  # Not started
-                    else:
-                        item.Status = 1  # In progress
-                if complete is not None:
-                    item.Complete = complete
-                    if complete:
-                        item.PercentComplete = 100
-                        item.Status = 2
-                    else:
-                        item.PercentComplete = 0
-                        item.Status = 0
-                item.Save()
-                return True
-            except Exception as e:
-                print(f"Error editing task: {e}", file=sys.stderr)
-            pass
-        return False
+        item = self._require_item(entry_id, "Task")
+        with _com_operation("edit task"):
+            if subject:
+                item.Subject = subject
+            if body is not None:
+                item.Body = body
+            if due_date:
+                # Use noon to avoid timezone boundary issues
+                item.DueDate = datetime.strptime(
+                    f"{due_date} 12:00:00", "%Y-%m-%d %H:%M:%S"
+                )
+            if importance is not None:
+                item.Importance = importance
+            if percent_complete is not None:
+                item.PercentComplete = percent_complete
+                # Update status based on percent_complete
+                if percent_complete == 100:
+                    item.Status = 2  # Complete
+                    item.Complete = True
+                elif percent_complete == 0:
+                    item.Status = 0  # Not started
+                else:
+                    item.Status = 1  # In progress
+            if complete is not None:
+                item.Complete = complete
+                if complete:
+                    item.PercentComplete = 100
+                    item.Status = 2
+                else:
+                    item.PercentComplete = 0
+                    item.Status = 0
+            item.Save()
+            return True
 
     def complete_task(self, entry_id):
         """
@@ -1864,18 +1904,17 @@ class OutlookBridge:
 
         Returns:
             True if successful
+
+        Raises:
+            MailtoolError: If the task doesn't exist or can't be saved.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
-            try:
-                item.Complete = True
-                item.PercentComplete = 100
-                item.Status = 2  # olTaskComplete
-                item.Save()
-                return True
-            except Exception:
-                pass
-        return False
+        item = self._require_item(entry_id, "Task")
+        with _com_operation("complete task"):
+            item.Complete = True
+            item.PercentComplete = 100
+            item.Status = 2  # olTaskComplete
+            item.Save()
+            return True
 
     def delete_task(self, entry_id):
         """
@@ -1886,15 +1925,14 @@ class OutlookBridge:
 
         Returns:
             True if successful
+
+        Raises:
+            MailtoolError: If the task doesn't exist or can't be deleted.
         """
-        item = self.get_item_by_id(entry_id)
-        if item:
-            try:
-                item.Delete()
-                return True
-            except Exception:
-                pass
-        return False
+        item = self._require_item(entry_id, "Task")
+        with _com_operation("delete task"):
+            item.Delete()
+            return True
 
     def search_emails(self, filter_query, limit=100, include_non_mail=False):
         """
@@ -1922,14 +1960,14 @@ class OutlookBridge:
             include_non_mail: If True, do not scope the filter to IPM.Note items
 
         Returns:
-            List of email dictionaries
+            List of email dictionaries (empty only when nothing matches)
 
         Raises:
             ValueError: If a LIKE filter references a field without a known
                 DASL mapping (supported: the fields in DASL_FIELD_MAP).
-            RuntimeError: If Outlook rejects the filter (invalid syntax) or the
-                COM call fails. Callers previously saw a silent empty list here,
-                which made bad filters indistinguishable from "no matches".
+            MailtoolError: If the Inbox can't be found, Outlook rejects the
+                filter (invalid syntax), or the COM call fails. A bad filter
+                must not be indistinguishable from "no matches".
         """
         # Use get_inbox() directly to ensure correct account
         folder = self.get_inbox()
@@ -1941,7 +1979,7 @@ class OutlookBridge:
         dasl_mode = prepared.startswith("@SQL=")
 
         if folder is None:
-            raise RuntimeError("Inbox folder not found")
+            raise MailtoolError("Inbox folder not found")
         items = folder.Items
         # Compose the effective filter. Unless the caller opts out of the
         # mail-only scope (or already mentioned MessageClass themselves),
@@ -1974,26 +2012,26 @@ class OutlookBridge:
                     "translated to DASL automatically, other SQL-isms "
                     "(IN/GLOB/underscore wildcards) are not."
                 )
-                print(f"Error searching emails: {msg}", file=sys.stderr)
-                raise RuntimeError(msg) from e
+                raise MailtoolError(msg) from e
 
-        # Sort by received time, most recent first
-        items.Sort("[ReceivedTime]", True)
+        with _com_operation("search emails"):
+            # Sort by received time, most recent first
+            items.Sort("[ReceivedTime]", True)
 
-        emails = []
-        count = 0
-        for item in items:
-            if count >= limit:
-                break
+            emails = []
+            count = 0
+            for item in items:
+                if count >= limit:
+                    break
 
-            try:
-                emails.append(self._mail_item_to_dict(item, include_body=False))
-                count += 1
-            except Exception:
-                # Skip items that can't be accessed
-                continue
+                try:
+                    emails.append(self._mail_item_to_dict(item, include_body=False))
+                    count += 1
+                except Exception as e:
+                    # One unreadable item must not sink the whole search.
+                    _warn_skipped("an unreadable email", e)
 
-        return emails
+            return emails
 
     def search_by_sender(
         self, sender_email, limit=100, folder="Inbox", include_non_mail=False
@@ -2012,16 +2050,14 @@ class OutlookBridge:
             include_non_mail: If True, also consider non-mail items
 
         Returns:
-            List of email dictionaries matching the sender
-        """
-        try:
-            mail_folder, _ = self._resolve_folder(folder)
-            if mail_folder is None:
-                print(
-                    "Error searching emails by sender: Inbox not found", file=sys.stderr
-                )
-                return []
+            List of email dictionaries matching the sender (empty only when
+            nothing matches)
 
+        Raises:
+            MailtoolError: If the folder can't be found or the COM calls fail.
+        """
+        mail_folder, _ = self._resolve_folder(folder)
+        with _com_operation("search emails by sender"):
             items = mail_folder.Items
             # Filter to real emails unless the caller opts out.
             if not include_non_mail:
@@ -2043,14 +2079,11 @@ class OutlookBridge:
                     if d["sender"] and d["sender"].lower() == target:
                         emails.append(d)
                         count += 1
-                except Exception:
-                    # Skip items that can't be accessed
-                    continue
+                except Exception as e:
+                    # One unreadable item must not sink the whole search.
+                    _warn_skipped("an unreadable email", e)
 
             return emails
-        except Exception as e:
-            print(f"Error searching emails by sender: {e}", file=sys.stderr)
-            return []
 
     def get_inbox_stats(self, folder="Inbox"):
         """
@@ -2064,26 +2097,20 @@ class OutlookBridge:
 
         Returns:
             Dict with 'folder', 'total', and 'unread' integer counts
+
+        Raises:
+            MailtoolError: If the folder can't be found or a count can't be read.
         """
-        try:
-            mail_folder, queried_folder = self._resolve_folder(folder)
-
-            if mail_folder is None:
-                return {"folder": queried_folder, "total": 0, "unread": 0}
-
+        mail_folder, queried_folder = self._resolve_folder(folder)
+        with _com_operation("get inbox stats"):
             items = mail_folder.Items
-            total = self._safe_get_attr(items, "Count", 0) or 0
-            try:
-                unread = items.Restrict("[Unread] = TRUE").Count
-            except Exception:
-                unread = 0
+            total = items.Count
+            unread = items.Restrict("[Unread] = TRUE").Count
             return {
                 "folder": queried_folder,
                 "total": int(total),
                 "unread": int(unread),
             }
-        except Exception:
-            return {"folder": folder, "total": 0, "unread": 0}
 
     def get_free_busy(
         self, email_address=None, start_date=None, end_date=None, entry_id=None
@@ -2098,9 +2125,14 @@ class OutlookBridge:
             entry_id: DEPRECATED - Appointment entry ID (legacy, use email_address instead)
 
         Returns:
-            Dictionary with free/busy information
+            Dictionary with free/busy information. An address Outlook can't
+            resolve is a normal answer, not a failure: the dict has
+            resolved=False and an "error" description.
+
+        Raises:
+            MailtoolError: If the COM calls fail or a date can't be parsed.
         """
-        try:
+        with _com_operation("get free/busy"):
             # Handle legacy entry_id parameter (extract first required attendee)
             if entry_id and not email_address:
                 item = self.get_item_by_id(entry_id)
@@ -2151,9 +2183,3 @@ class OutlookBridge:
                     "error": "Could not resolve email address",
                     "resolved": False,
                 }
-        except Exception as e:
-            return {
-                "email": email_address if email_address else "unknown",
-                "error": str(e),
-                "resolved": False,
-            }
