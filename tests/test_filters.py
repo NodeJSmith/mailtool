@@ -448,4 +448,7 @@ class TestMeetingStatusLabels:
         bridge = OutlookBridge.__new__(OutlookBridge)  # skip COM __init__
         bridge.get_item_by_id = lambda entry_id: item
 
-        assert bridge.get_appointment(item.EntryID)["meeting_status"] == label
+        appointment = bridge.get_appointment(item.EntryID)
+
+        assert appointment is not None
+        assert appointment["meeting_status"] == label

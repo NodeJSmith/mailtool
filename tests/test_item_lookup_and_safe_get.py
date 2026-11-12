@@ -8,7 +8,7 @@ Pure-Python: fake COM objects stand in for Outlook, so no pywin32 is needed.
 import pytest
 
 from mailtool import bridge as bridge_module
-from mailtool.bridge import COM_ATTR_ERRORS, OutlookBridge
+from mailtool.bridge import COM_ATTR_ERRORS, MailtoolError, OutlookBridge
 
 pytestmark = pytest.mark.unit
 
@@ -72,10 +72,11 @@ def test_edit_appointment_uses_get_item_from_id():
     assert appt.saved is True
 
 
-def test_edit_appointment_unknown_id_returns_false():
+def test_edit_appointment_unknown_id_raises():
     bridge = make_bridge({})
 
-    assert bridge.edit_appointment("missing", subject="new") is False
+    with pytest.raises(MailtoolError, match="Appointment not found: missing"):
+        bridge.edit_appointment("missing", subject="new")
 
 
 def test_edit_appointment_rejects_other_item_types():
