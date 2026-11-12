@@ -304,6 +304,7 @@ def _find_folder_by_name(
     that can't be listed or read is warned about on stderr, and if the search
     finds nothing, MailtoolError is raised (chained from the first such
     failure), because the folder may be in the part that couldn't be searched.
+    Reaching `max_visited` without a match raises for the same reason.
     """
     target_lower = str(target_name).strip().lower()
     frontier = deque([(folder, 0)])
@@ -333,6 +334,12 @@ def _find_folder_by_name(
                 frontier.append((child, depth + 1))
             if visited >= max_visited:
                 break
+    if visited >= max_visited:
+        # Stopped at the cap: the folder may exist in the part not searched.
+        raise MailtoolError(
+            f"Folder '{target_name}' not found in the first {max_visited} "
+            "folders searched; the search stopped there"
+        )
     if first_failure is not None:
         raise MailtoolError(
             f"Folder '{target_name}' not found, but {failures} folder(s) could "
@@ -555,9 +562,12 @@ class OutlookBridge:
         An EntryID for an email must not be read or edited as an appointment.
         """
         item = self.get_item_by_id(entry_id)
-        if item is not None and self._safe_get_attr(item, "Class") != olclass:
+        if item is None:
             return None
-        return item
+        # Read Class directly: a failed read must raise, not pass for "wrong type".
+        with _com_operation(f"read the class of item {entry_id}"):
+            item_class = item.Class
+        return item if item_class == olclass else None
 
     def _require_item(self, entry_id, kind, olclass=None):
         """Return the item for entry_id, raising MailtoolError if it doesn't exist
@@ -893,25 +903,23 @@ class OutlookBridge:
 
     @staticmethod
     def _attachment_count(item):
-        """Return the number of attachments on a COM item (0 on any failure)."""
-        try:
+        """Return the number of attachments on a COM item.
+
+        A failed read raises rather than reporting 0, so it can't pass for "no
+        attachments"; list loops skip that item with a warning.
+        """
+        with _com_operation("count attachments"):
             return item.Attachments.Count
-        except Exception:
-            return 0
 
     def _extract_attachments(self, item):
         """Build a list of attachment-metadata dicts from a COM item."""
         out = []
-        try:
+        with _com_operation("read attachments"):
             attachments = item.Attachments
             count = attachments.Count
-        except Exception:
-            return out
         for i in range(1, count + 1):
-            try:
+            with _com_operation(f"read attachment {i}"):
                 a = attachments.Item(i)
-            except Exception:
-                continue
             out.append(
                 {
                     "filename": self._safe_get_attr(a, "FileName", "") or "",
@@ -1234,6 +1242,10 @@ class OutlookBridge:
         for item in items:
             scanned += 1
             if scanned > CALENDAR_MAX_ITEMS:
+                print(
+                    f"Warning: calendar listing truncated at {CALENDAR_MAX_ITEMS} items",
+                    file=sys.stderr,
+                )
                 break
             try:
                 # Use safe attribute access to handle COM errors

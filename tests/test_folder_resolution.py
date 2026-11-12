@@ -99,10 +99,12 @@ class TestFindFolderByName:
     def test_max_visited_bounds_a_wide_search(self):
         # 10 direct children; target is the last one visited. A max_visited
         # of 3 must give up before reaching it, even though max_depth (8)
-        # would otherwise allow the search to continue.
+        # would otherwise allow the search to continue, and say it stopped
+        # rather than report the folder as missing.
         children = [FakeMailFolder(f"Child{i}") for i in range(10)]
         root = FakeMailFolder("Root", children)
-        assert _find_folder_by_name(root, "Child9", 8, max_visited=3) is None
+        with pytest.raises(MailtoolError, match="search stopped"):
+            _find_folder_by_name(root, "Child9", 8, max_visited=3)
         assert _find_folder_by_name(root, "Child9", 8, max_visited=20) is children[9]
 
 

@@ -508,6 +508,8 @@ def run_command(bridge: OutlookBridge, args: argparse.Namespace) -> None:
             end_date=getattr(args, "end", None),
             entry_id=getattr(args, "id", None),
         )
+        if not freebusy.get("resolved"):
+            fail(f"Could not resolve email address: {freebusy.get('email')}")
         print(json.dumps(freebusy, indent=2))
 
     elif args.command == "tasks":

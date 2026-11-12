@@ -42,8 +42,9 @@ upstream, so nothing here publishes.
 - **Return values.** Failures raise `MailtoolError` (a `RuntimeError`), never an empty
   result or a `False` sentinel, because the consumers are unattended digests that read an
   empty list as "nothing new". Lists return `[]` only when nothing matches; a fetch by an
-  EntryID that doesn't exist, or whose item is the wrong type (appointment/task methods check
-  Outlook's `Class`), returns `None` (not a failure). Only Outlook's not-found errors
+  EntryID that doesn't exist returns `None` (not a failure), and so does the wrong item type,
+  but only appointment and task methods check Outlook's `Class`; email methods accept any
+  item. Only Outlook's not-found errors
   (`NOT_FOUND_HRESULTS`) count as not found; any other lookup error raises, so an Outlook
   outage can't read as "not found". Mutators return `True` and creates return the new
   EntryID. A list loop may skip one unreadable item (with a stderr

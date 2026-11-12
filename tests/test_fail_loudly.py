@@ -135,8 +135,13 @@ class FakeFolder:
         self.Items = items
 
 
+class NoAttachments:
+    Count = 0
+
+
 class GoodMail:
     EntryID = "mail-good"
+    Attachments = NoAttachments()
     Subject = "hello"
     MessageClass = "IPM.Note"
     SenderEmailType = "SMTP"
@@ -644,6 +649,22 @@ class TestItemClassChecks:
 
         assert item.calls == []
 
+    @pytest.mark.parametrize("method", ["get_appointment", "get_task"])
+    def test_unreadable_class_raises_instead_of_not_found(self, method):
+        class UnreadableClassItem(FakeItem):
+            @property
+            def Class(self):  # noqa: N802 - mirrors Outlook COM API
+                raise FakeComError("store offline")
+
+            @Class.setter
+            def Class(self, _value):  # noqa: N802 - mirrors Outlook COM API
+                pass
+
+        bridge = make_bridge(items={"id-1": UnreadableClassItem()})
+
+        with pytest.raises(MailtoolError, match="read the class"):
+            getattr(bridge, method)("id-1")
+
     def test_task_class_is_accepted_for_task_methods(self):
         bridge = make_bridge(items={"id-1": FakeItem(olclass=48)})
 
@@ -947,3 +968,41 @@ class TestCliExtras:
     def test_unconfigured_bridge_method_raises_attribute_error(self):
         with pytest.raises(AttributeError):
             FakeCliBridge({}).list_emails()
+
+
+class BrokenAttachmentsItem:
+    @property
+    def Attachments(self):  # noqa: N802 - mirrors Outlook COM API
+        raise FakeComError("store offline")
+
+
+class TestAttachmentReadFailures:
+    """A failed attachment read must not pass for "no attachments"."""
+
+    def test_count_failure_raises(self):
+        with pytest.raises(MailtoolError, match="count attachments"):
+            OutlookBridge._attachment_count(BrokenAttachmentsItem())
+
+    def test_extract_failure_raises(self):
+        bridge = make_bridge()
+
+        with pytest.raises(MailtoolError, match="read attachments"):
+            bridge._extract_attachments(BrokenAttachmentsItem())
+
+
+class TestFreeBusyCli:
+    def test_unresolvable_address_exits_1(self, run_cli):
+        code, out, _ = run_cli(
+            ["freebusy", "--email", "typo@example.com"],
+            get_free_busy=lambda **_kw: {
+                "email": "typo@example.com",
+                "resolved": False,
+                "error": "Could not resolve email address",
+            },
+        )
+
+        assert code == 1
+        assert json.loads(out) == {
+            "status": "error",
+            "message": "Could not resolve email address: typo@example.com",
+        }
