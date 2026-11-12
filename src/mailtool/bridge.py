@@ -35,6 +35,19 @@ except ImportError:
     # OutlookBridge still requires pywin32 + a running Outlook on Windows.
     win32com = None
 
+try:
+    import pywintypes
+except ImportError:
+    pywintypes = None
+
+# Exception types a COM attribute read can legitimately raise: a COM failure
+# (pywintypes.com_error, when pywin32 is present) or a missing attribute.
+# Anything else (e.g. a TypeError from a coding mistake) is a real defect and
+# should propagate rather than look like an empty field.
+COM_ATTR_ERRORS: tuple[type[BaseException], ...] = (
+    (pywintypes.com_error, AttributeError) if pywintypes else (AttributeError,)
+)
+
 # Regex used to salvage an SMTP address out of a raw Exchange DN or display string
 # when both GetExchangeUser() and the PropertyAccessor lookup fail.
 _SMTP_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -310,8 +323,7 @@ class OutlookBridge:
         """
         try:
             return getattr(obj, attr, default)
-        # Catch pywintypes.com_error if available, otherwise fall back to Exception
-        except Exception:
+        except COM_ATTR_ERRORS:
             return default
 
     def __init__(self, default_account: str | None = None):
@@ -1519,29 +1531,25 @@ class OutlookBridge:
             True if successful
         """
         try:
-            calendar = self.get_calendar()
-            if calendar is None:
-                print("Error editing appointment: calendar not found", file=sys.stderr)
+            item = self.get_item_by_id(entry_id)
+            if item is None:
                 return False
-            for item in calendar.Items:
-                if item.EntryID == entry_id:
-                    if required_attendees:
-                        item.RequiredAttendees = required_attendees
-                    if optional_attendees:
-                        item.OptionalAttendees = optional_attendees
-                    if subject:
-                        item.Subject = subject
-                    if start:
-                        item.Start = datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
-                    if end:
-                        item.End = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
-                    if location is not None:
-                        item.Location = location
-                    if body is not None:
-                        item.Body = body
-                    item.Save()
-                    return True
-            return False
+            if required_attendees:
+                item.RequiredAttendees = required_attendees
+            if optional_attendees:
+                item.OptionalAttendees = optional_attendees
+            if subject:
+                item.Subject = subject
+            if start:
+                item.Start = datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
+            if end:
+                item.End = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
+            if location is not None:
+                item.Location = location
+            if body is not None:
+                item.Body = body
+            item.Save()
+            return True
         except Exception as e:
             print(f"Error editing appointment: {e}", file=sys.stderr)
             return False
