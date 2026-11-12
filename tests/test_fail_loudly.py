@@ -35,6 +35,12 @@ class FakeWrappedNotFoundError(FakeComError):
     excepinfo = (0, "Microsoft Outlook", "not found", None, 0, -2147221241)
 
 
+class FakeMalformedIdError(FakeComError):
+    """E_INVALIDARG, which Outlook raises for a string that isn't an EntryID."""
+
+    hresult = -2147024809
+
+
 class AnyClass:
     """An Outlook Class value that matches whatever class a method asks for."""
 
@@ -447,6 +453,12 @@ class TestNotFoundReturnsNone:
 
     def test_get_appointment_missing_is_none(self):
         assert make_bridge().get_appointment("nope") is None
+
+    def test_malformed_entry_id_is_none(self):
+        """Outlook rejects a string that isn't an EntryID with E_INVALIDARG."""
+        bridge = make_bridge(lookup_error=FakeMalformedIdError("bad id"))
+
+        assert bridge.get_item_by_id("invalid_id_12345") is None
 
     def test_get_email_body_read_failure_raises(self):
         bridge = make_bridge(items={"id-1": BadMail()})
