@@ -35,6 +35,12 @@ class FakeWrappedNotFoundError(FakeComError):
     excepinfo = (0, "Microsoft Outlook", "not found", None, 0, -2147221241)
 
 
+class FakeMalformedIdError(FakeComError):
+    """E_INVALIDARG, which Outlook raises for a string that isn't an EntryID."""
+
+    hresult = -2147024809
+
+
 class AnyClass:
     """An Outlook Class value that matches whatever class a method asks for."""
 
@@ -395,6 +401,49 @@ class TestCreateAndSend:
             bridge.create_appointment("s", "not a date", "also not")
 
 
+class FakeReplyableMail(FakeItem):
+    """A received email whose Reply/ReplyAll hand back a FakeMail to inspect."""
+
+    def __init__(self, reply_fail_on=()):
+        super().__init__()
+        self.replies = []
+        self.reply_fail_on = reply_fail_on
+
+    def make_reply(self, kind):
+        self.calls.append(kind)
+        reply = FakeMail(fail_on=self.reply_fail_on)
+        self.replies.append(reply)
+        return reply
+
+    def Reply(self):  # noqa: N802 - mirrors Outlook COM API
+        return self.make_reply("Reply")
+
+    def ReplyAll(self):  # noqa: N802 - mirrors Outlook COM API
+        return self.make_reply("ReplyAll")
+
+
+class TestReplyEmail:
+    @pytest.mark.parametrize(
+        ("reply_all", "kind"), [(False, "Reply"), (True, "ReplyAll")]
+    )
+    def test_reply_sets_body_and_sends(self, reply_all, kind):
+        original = FakeReplyableMail()
+        bridge = make_bridge(items={"id-1": original})
+
+        assert bridge.reply_email("id-1", "reply body", reply_all=reply_all) is True
+
+        assert original.calls == [kind]
+        (reply,) = original.replies
+        assert reply.Body == "reply body"
+        assert reply.calls == ["Send"]
+
+    def test_reply_send_failure_raises(self):
+        bridge = make_bridge(items={"id-1": FakeReplyableMail(reply_fail_on=["Send"])})
+
+        with pytest.raises(MailtoolError, match="reply to email"):
+            bridge.reply_email("id-1", "reply body")
+
+
 class TestNotFoundReturnsNone:
     def test_get_email_body_missing_is_none(self):
         assert make_bridge().get_email_body("nope") is None
@@ -404,6 +453,12 @@ class TestNotFoundReturnsNone:
 
     def test_get_appointment_missing_is_none(self):
         assert make_bridge().get_appointment("nope") is None
+
+    def test_malformed_entry_id_is_none(self):
+        """Outlook rejects a string that isn't an EntryID with E_INVALIDARG."""
+        bridge = make_bridge(lookup_error=FakeMalformedIdError("bad id"))
+
+        assert bridge.get_item_by_id("invalid_id_12345") is None
 
     def test_get_email_body_read_failure_raises(self):
         bridge = make_bridge(items={"id-1": BadMail()})

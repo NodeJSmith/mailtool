@@ -79,12 +79,12 @@ FOLDER_SEARCH_MAX_VISITED = 500
 OL_APPOINTMENT = 26
 OL_TASK = 48
 
-# MAPI error codes that mean "no item has this EntryID": MAPI_E_NOT_FOUND
-# (0x8004010F) and MAPI_E_INVALID_ENTRYID (0x80040107). get_item_by_id returns
-# None for these and raises for every other failure. These codes have not been
-# confirmed against a live mailbox: check what GetItemFromID raises for a
-# deleted item and for a malformed ID, and extend this set if needed.
-NOT_FOUND_HRESULTS = frozenset({-2147221233, -2147221241})
+# Error codes that mean "no item has this EntryID". get_item_by_id returns None
+# for these and raises for every other failure.
+# - MAPI_E_NOT_FOUND (0x8004010F) and MAPI_E_INVALID_ENTRYID (0x80040107).
+# - E_INVALIDARG (0x80070057): what a live Outlook raises for a string that isn't
+#   a well-formed EntryID at all, such as "invalid_id_12345".
+NOT_FOUND_HRESULTS = frozenset({-2147221233, -2147221241, -2147024809})
 
 # Outlook OlResponseStatus enum.
 RESPONSE_STATUS_LABELS = {

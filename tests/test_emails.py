@@ -192,23 +192,6 @@ class TestEmails:
         # Cleanup
         cleanup_helpers["delete_drafts_by_prefix"](TEST_PREFIX)
 
-    def test_reply_to_email(self, bridge, sample_email_data):
-        """Test replying to an email"""
-        # We can't actually send, but we can create the reply object
-        # This test verifies the API works
-        entry_id = sample_email_data["entry_id"]
-
-        # Note: We won't actually send to avoid sending real emails
-        # Just verify the method doesn't crash when called
-        # (It may fail if we can't reply to a draft, which is fine)
-        try:
-            result = bridge.reply_email(entry_id, "Test reply body", reply_all=False)
-            # May return False if draft can't be replied to
-            assert isinstance(result, bool)
-        except Exception:
-            # Expected - drafts may not be replyable
-            pass
-
     def test_search_by_sender(self, bridge):
         """Test searching emails by sender (handles Exchange addresses)"""
         # Get some emails from inbox to find a sender
