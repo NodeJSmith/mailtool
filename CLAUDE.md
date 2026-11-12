@@ -43,10 +43,15 @@ upstream, so nothing here publishes.
 ## Testing
 
 ```bash
-uv run pytest -m unit         # Outlook-free tests; run anywhere
-uv run pytest                 # full suite; needs Windows with Outlook running
+uv run pytest                 # anywhere; live-Outlook tests skip off Windows
+uv run pytest -m windows      # only the live-Outlook tests (Windows + Outlook)
 ```
 
+- Any test using the `bridge` fixture (directly or through another fixture) is marked
+  `windows` automatically by `conftest.py` and skipped where pywin32 isn't available. New
+  live-Outlook tests need no manual marker; new pure-Python tests must not request `bridge`.
+- CI (`tests.yml`, ubuntu) runs the pure-Python tests; the live-Outlook ones run only on a
+  Windows machine with Outlook open.
 - Integration tests use real Outlook data, no mocking. Items they create carry a `[TEST] `
   prefix and are cleaned up by prefix.
 - COM is apartment-threaded: all calls happen on one thread (the session-scoped fixture), so
@@ -59,7 +64,7 @@ uv run pytest                 # full suite; needs Windows with Outlook running
 mise install                              # prek, python, uv
 uv sync
 prek install                              # pre-commit + pre-push hooks
-prek run --all-files                      # everything CI's lint job runs
+prek run --all-files --stage pre-push     # everything CI's lint job runs
 ```
 
 Hooks live in `prek.toml`; Renovate (self-hosted, `renovate.json`) keeps their revs and the

@@ -2,9 +2,13 @@
 Pytest configuration and fixtures for mailtool Outlook bridge tests
 
 This module provides shared fixtures and test utilities for testing the Outlook bridge.
-All tests use real Outlook data - no mocking.
+Integration tests use real Outlook data - no mocking. Any test that depends on the
+`bridge` fixture, directly or through another fixture, is marked `windows` and skipped
+where pywin32 isn't available, so `pytest` runs green on Linux and in CI.
 """
 
+import importlib.util
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -20,6 +24,21 @@ TEST_PREFIX = "[TEST] "
 WARMUP_TIMEOUT = 30
 WARMUP_ATTEMPTS = 5
 WARMUP_DELAY = 0.5
+
+LIVE_OUTLOOK_AVAILABLE = (
+    sys.platform == "win32" and importlib.util.find_spec("win32com") is not None
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Mark every test that needs the live `bridge` fixture, and skip it off Windows."""
+    skip = pytest.mark.skip(reason="needs Windows with pywin32 and a running Outlook")
+    for item in items:
+        if "bridge" not in getattr(item, "fixturenames", ()):
+            continue
+        item.add_marker(pytest.mark.windows)
+        if not LIVE_OUTLOOK_AVAILABLE:
+            item.add_marker(skip)
 
 
 @pytest.fixture(scope="session")
