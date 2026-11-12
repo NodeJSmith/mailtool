@@ -40,6 +40,16 @@ except ImportError:
 # when both GetExchangeUser() and the PropertyAccessor lookup fail.
 _SMTP_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
+# Outlook OlMeetingStatus enum. There is no 2, and an invite received from
+# someone else is 3, not "cancelled": cancellations are 5 and 7.
+MEETING_STATUS_LABELS = {
+    0: "NonMeeting",
+    1: "Meeting",
+    3: "Received",
+    5: "Canceled",
+    7: "ReceivedAndCanceled",
+}
+
 # Outlook Restrict filter that captures IPM.Note and its subtypes (e.g. IPM.Note.SMIME)
 # while excluding meeting notifications (IPM.Schedule.Meeting.*), post items, reports,
 # etc. Uses the same half-open MessageClass range trick as list_calendar_events().
@@ -1114,14 +1124,7 @@ class OutlookBridge:
                     5: "NotResponded",
                 }
 
-                # MeetingStatus: 0=Non-meeting, 1=Meeting, 2=Received, 3=Canceled
                 meeting_status = self._safe_get_attr(item, "MeetingStatus")
-                meeting_status_map = {
-                    0: "NonMeeting",
-                    1: "Meeting",
-                    2: "Received",
-                    3: "Canceled",
-                }
 
                 event = {
                     "entry_id": self._safe_get_attr(item, "EntryID", ""),
@@ -1136,7 +1139,9 @@ class OutlookBridge:
                     "response_status": response_status_map.get(
                         response_status, "Unknown"
                     ),
-                    "meeting_status": meeting_status_map.get(meeting_status, "Unknown"),
+                    "meeting_status": MEETING_STATUS_LABELS.get(
+                        meeting_status, "Unknown"
+                    ),
                     "response_requested": self._safe_get_attr(
                         item, "ResponseRequested", False
                     ),
@@ -1558,12 +1563,6 @@ class OutlookBridge:
                 meeting_status = (
                     item.MeetingStatus if hasattr(item, "MeetingStatus") else None
                 )
-                meeting_status_map = {
-                    0: "NonMeeting",
-                    1: "Meeting",
-                    2: "Received",
-                    3: "Canceled",
-                }
 
                 return {
                     "entry_id": item.EntryID,
@@ -1587,7 +1586,9 @@ class OutlookBridge:
                     "response_status": response_status_map.get(
                         response_status, "Unknown"
                     ),
-                    "meeting_status": meeting_status_map.get(meeting_status, "Unknown"),
+                    "meeting_status": MEETING_STATUS_LABELS.get(
+                        meeting_status, "Unknown"
+                    ),
                     "response_requested": item.ResponseRequested
                     if hasattr(item, "ResponseRequested")
                     else False,

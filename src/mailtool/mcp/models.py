@@ -148,7 +148,8 @@ class AppointmentSummary(BaseModel):
         description="Meeting response status: None, Organizer, Tentative, Accepted, Declined, NotResponded, Unknown"
     )
     meeting_status: str = Field(
-        description="Meeting status: NonMeeting, Meeting, Received, Canceled, Unknown"
+        description="Meeting status: NonMeeting, Meeting, Received, Canceled, "
+        "ReceivedAndCanceled, Unknown"
     )
     response_requested: bool = Field(description="Whether response was requested")
 
