@@ -17,14 +17,14 @@ Usage:
     python outlook_com_bridge.py email --id <entry_id>
 """
 
-# Modified to test pre-commit hook
-
 import contextlib
+import os
 import re
 import sys
 import traceback
 from collections import deque
 from datetime import datetime, timedelta
+from typing import Any
 
 try:
     import win32com.client
@@ -47,6 +47,29 @@ MEETING_STATUS_LABELS = {
     3: "Received",
     5: "Canceled",
     7: "ReceivedAndCanceled",
+}
+
+# Maximum depth (levels below an account root) get_folder_by_name will
+# recurse into when searching for a bare folder name. Real mailbox trees
+# rarely nest more than a handful of levels deep; this just bounds
+# pathological cases.
+FOLDER_SEARCH_MAX_DEPTH = 8
+
+# Maximum total folders _find_folder_by_name will visit across the whole
+# search, independent of depth. A depth bound alone doesn't limit the work
+# for a wide tree — a mailbox with thousands of folders spread across a few
+# levels can still visit all of them, and each visit is a synchronous COM
+# call on the main thread. This caps the worst case regardless of shape.
+FOLDER_SEARCH_MAX_VISITED = 500
+
+# Outlook OlResponseStatus enum.
+RESPONSE_STATUS_LABELS = {
+    0: "None",
+    1: "Organizer",
+    2: "Tentative",
+    3: "Accepted",
+    4: "Declined",
+    5: "NotResponded",
 }
 
 # Outlook Restrict filter that captures IPM.Note and its subtypes (e.g. IPM.Note.SMIME)
@@ -204,20 +227,6 @@ def translate_filter(filter_query):
     return filter_query
 
 
-# Maximum depth (levels below an account root) get_folder_by_name will
-# recurse into when searching for a bare folder name. Real mailbox trees
-# rarely nest more than a handful of levels deep; this just bounds
-# pathological cases.
-FOLDER_SEARCH_MAX_DEPTH = 8
-
-# Maximum total folders _find_folder_by_name will visit across the whole
-# search, independent of depth. A depth bound alone doesn't limit the work
-# for a wide tree — a mailbox with thousands of folders spread across a few
-# levels can still visit all of them, and each visit is a synchronous COM
-# call on the main thread. This caps the worst case regardless of shape.
-FOLDER_SEARCH_MAX_VISITED = 500
-
-
 def _folder_by_path(root, path_parts):
     """Walk a list of folder-name segments from `root` (e.g. ["Inbox",
     "Databricks Alerts"]). Each segment is matched case-insensitively.
@@ -287,7 +296,7 @@ class OutlookBridge:
     """Bridge to Outlook application via COM"""
 
     @staticmethod
-    def _safe_get_attr(obj, attr, default=None):
+    def _safe_get_attr(obj, attr, default=None) -> Any:
         """
         Safely get an attribute from a COM object, handling COM errors gracefully
 
@@ -313,6 +322,8 @@ class OutlookBridge:
         1. Try GetActiveObject first (if Outlook is running)
         2. Fall back to Dispatch if Outlook is closed
         """
+        if win32com is None:
+            raise RuntimeError("pywin32 is not importable; OutlookBridge needs it")
         try:
             self.outlook = win32com.client.GetActiveObject("Outlook.Application")
         except Exception as e:
@@ -1066,8 +1077,13 @@ class OutlookBridge:
 
         Returns:
             List of event dictionaries
+
+        Raises:
+            RuntimeError: If the calendar folder can't be found.
         """
         calendar = self.get_calendar()
+        if calendar is None:
+            raise RuntimeError("Calendar folder not found")
         items = calendar.Items
 
         # Canonical order per Microsoft docs: Sort -> IncludeRecurrences ->
@@ -1121,16 +1137,7 @@ class OutlookBridge:
                 optional_attendees = self._safe_get_attr(item, "OptionalAttendees", "")
 
                 # Get meeting status
-                # ResponseStatus: 0=None, 1=Organizer, 2=Tentative, 3=Accepted, 4=Declined, 5=NotResponded
                 response_status = self._safe_get_attr(item, "ResponseStatus")
-                response_status_map = {
-                    0: "None",
-                    1: "Organizer",
-                    2: "Tentative",
-                    3: "Accepted",
-                    4: "Declined",
-                    5: "NotResponded",
-                }
 
                 meeting_status = self._safe_get_attr(item, "MeetingStatus")
 
@@ -1144,7 +1151,7 @@ class OutlookBridge:
                     "all_day": self._safe_get_attr(item, "AllDayEvent", False),
                     "required_attendees": required_attendees,
                     "optional_attendees": optional_attendees,
-                    "response_status": response_status_map.get(
+                    "response_status": RESPONSE_STATUS_LABELS.get(
                         response_status, "Unknown"
                     ),
                     "meeting_status": MEETING_STATUS_LABELS.get(
@@ -1418,8 +1425,6 @@ class OutlookBridge:
 
         downloaded = []
         try:
-            import os
-
             os.makedirs(download_dir, exist_ok=True)
 
             for i in range(item.Attachments.Count):
@@ -1515,6 +1520,9 @@ class OutlookBridge:
         """
         try:
             calendar = self.get_calendar()
+            if calendar is None:
+                print("Error editing appointment: calendar not found", file=sys.stderr)
+                return False
             for item in calendar.Items:
                 if item.EntryID == entry_id:
                     if required_attendees:
@@ -1557,20 +1565,8 @@ class OutlookBridge:
                 optional_attendees = (
                     item.OptionalAttendees if hasattr(item, "OptionalAttendees") else ""
                 )
-                response_status = (
-                    item.ResponseStatus if hasattr(item, "ResponseStatus") else None
-                )
-                response_status_map = {
-                    0: "None",
-                    1: "Organizer",
-                    2: "Tentative",
-                    3: "Accepted",
-                    4: "Declined",
-                    5: "NotResponded",
-                }
-                meeting_status = (
-                    item.MeetingStatus if hasattr(item, "MeetingStatus") else None
-                )
+                response_status = self._safe_get_attr(item, "ResponseStatus")
+                meeting_status = self._safe_get_attr(item, "MeetingStatus")
 
                 return {
                     "entry_id": item.EntryID,
@@ -1591,7 +1587,7 @@ class OutlookBridge:
                     else False,
                     "required_attendees": required_attendees,
                     "optional_attendees": optional_attendees,
-                    "response_status": response_status_map.get(
+                    "response_status": RESPONSE_STATUS_LABELS.get(
                         response_status, "Unknown"
                     ),
                     "meeting_status": MEETING_STATUS_LABELS.get(
@@ -1660,8 +1656,13 @@ class OutlookBridge:
 
         Returns:
             List of task dictionaries
+
+        Raises:
+            RuntimeError: If the tasks folder can't be found.
         """
         tasks_folder = self.get_tasks()
+        if tasks_folder is None:
+            raise RuntimeError("Tasks folder not found")
         items = tasks_folder.Items
 
         tasks = []
@@ -1925,6 +1926,8 @@ class OutlookBridge:
         prepared = translate_filter(raw_query)
         dasl_mode = prepared.startswith("@SQL=")
 
+        if folder is None:
+            raise RuntimeError("Inbox folder not found")
         items = folder.Items
         # Compose the effective filter. Unless the caller opts out of the
         # mail-only scope (or already mentioned MessageClass themselves),
@@ -1999,6 +2002,11 @@ class OutlookBridge:
         """
         try:
             mail_folder, _ = self._resolve_folder(folder)
+            if mail_folder is None:
+                print(
+                    "Error searching emails by sender: Inbox not found", file=sys.stderr
+                )
+                return []
 
             items = mail_folder.Items
             # Filter to real emails unless the caller opts out.

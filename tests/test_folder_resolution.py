@@ -65,11 +65,6 @@ def make_tree():
     return inbox, databricks_alerts, quality_alerts, unimportant
 
 
-# =============================================================================
-# _find_folder_by_name
-# =============================================================================
-
-
 class TestFindFolderByName:
     def test_finds_direct_child(self):
         inbox, _, _, unimportant = make_tree()
@@ -110,11 +105,6 @@ class TestFindFolderByName:
         assert _find_folder_by_name(root, "Child9", 8, max_visited=20) is children[9]
 
 
-# =============================================================================
-# _folder_by_path
-# =============================================================================
-
-
 class TestFolderByPath:
     def test_walks_multi_segment_path(self):
         inbox, _, quality_alerts, _ = make_tree()
@@ -137,11 +127,6 @@ class TestFolderByPath:
     def test_missing_final_segment_returns_none(self):
         inbox, _, _, _ = make_tree()
         assert _folder_by_path(inbox, ["Databricks Alerts", "Nope"]) is None
-
-
-# =============================================================================
-# get_folder_by_name (integration of the two helpers above)
-# =============================================================================
 
 
 def make_bridge_with_root(root_folder):
@@ -183,12 +168,6 @@ class TestGetFolderByName:
         assert bridge.get_folder_by_name("\\\\") is None
 
 
-# =============================================================================
-# _resolve_folder (via list_emails / search_by_sender / get_inbox_stats):
-# not-found warning instead of silent fallback
-# =============================================================================
-
-
 class FakeItems:
     def __init__(self, items=None):
         self._items = list(items or [])
@@ -204,9 +183,9 @@ class FakeItems:
 
 
 class TestFolderNotFoundWarning:
-    def test_list_emails_warns_and_falls_back_to_inbox(self, capsys):
+    def test_list_emails_warns_and_falls_back_to_inbox(self, monkeypatch, capsys):
         bridge = OutlookBridge.__new__(OutlookBridge)
-        bridge.get_folder_by_name = lambda _name: None
+        monkeypatch.setattr(bridge, "get_folder_by_name", lambda _name: None)
         inbox_folder = type("F", (), {"Items": FakeItems()})()
         bridge.get_inbox = lambda: inbox_folder
 
@@ -217,9 +196,9 @@ class TestFolderNotFoundWarning:
         assert "Nope" in captured.err
         assert "not found" in captured.err
 
-    def test_search_by_sender_warns_and_falls_back_to_inbox(self, capsys):
+    def test_search_by_sender_warns_and_falls_back_to_inbox(self, monkeypatch, capsys):
         bridge = OutlookBridge.__new__(OutlookBridge)
-        bridge.get_folder_by_name = lambda _name: None
+        monkeypatch.setattr(bridge, "get_folder_by_name", lambda _name: None)
         inbox_folder = type("F", (), {"Items": FakeItems()})()
         bridge.get_inbox = lambda: inbox_folder
 
@@ -243,12 +222,12 @@ class FakeCountableItems(FakeItems):
 
 
 class TestGetInboxStatsNotFoundReporting:
-    def test_warns_and_reports_inbox_not_the_requested_name(self, capsys):
+    def test_warns_and_reports_inbox_not_the_requested_name(self, monkeypatch, capsys):
         # get_inbox_stats previously fell back to Inbox silently AND kept
         # reporting the *requested* folder name in the result — valid-looking
         # counts attributed to a folder that was never queried.
         bridge = OutlookBridge.__new__(OutlookBridge)
-        bridge.get_folder_by_name = lambda _name: None
+        monkeypatch.setattr(bridge, "get_folder_by_name", lambda _name: None)
         inbox_folder = type("F", (), {"Items": FakeCountableItems(7)})()
         bridge.get_inbox = lambda: inbox_folder
 
@@ -260,10 +239,10 @@ class TestGetInboxStatsNotFoundReporting:
         assert "Nope" in captured.err
         assert "not found" in captured.err
 
-    def test_resolved_folder_reports_its_own_name(self):
+    def test_resolved_folder_reports_its_own_name(self, monkeypatch):
         bridge = OutlookBridge.__new__(OutlookBridge)
         target_folder = type("F", (), {"Items": FakeCountableItems(3)})()
-        bridge.get_folder_by_name = lambda _name: target_folder
+        monkeypatch.setattr(bridge, "get_folder_by_name", lambda _name: target_folder)
 
         result = bridge.get_inbox_stats(folder="Databricks Alerts")
 

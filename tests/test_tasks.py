@@ -4,8 +4,6 @@ Task functionality tests.
 Tests for listing, creating, and managing Outlook tasks.
 """
 
-# Modified to test pre-commit hook
-
 from datetime import datetime, timedelta
 
 import pytest

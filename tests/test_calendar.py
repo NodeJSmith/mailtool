@@ -4,8 +4,6 @@ Calendar functionality tests.
 Tests for listing, creating, and managing calendar appointments.
 """
 
-# Modified to test pre-commit hook
-
 from datetime import datetime, timedelta
 
 import pytest

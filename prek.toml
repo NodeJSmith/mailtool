@@ -63,6 +63,25 @@ require_serial = true
 types_or = ["python", "pyi"]
 
 [[repos.hooks]]
+id = "house-lint"
+name = "house-lint"
+language = "system"
+entry = "uv run house-lint check"
+require_serial = true
+types = ["python"]
+files = '^(src|tests)/.*\.py$'
+
+[[repos.hooks]]
+id = "pyright"
+name = "pyright"
+language = "system"
+entry = "uv run pyright"
+pass_filenames = false
+require_serial = true
+types_or = ["python", "pyi"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
 id = "no-mypy-ignore"
 name = 'Ban "type: ignore" comments (use pyright)'
 language = "pygrep"

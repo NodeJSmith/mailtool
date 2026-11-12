@@ -12,10 +12,6 @@ import pytest
 
 from mailtool.bridge import _SMTP_REGEX, MAIL_ONLY_FILTER, OutlookBridge
 
-# =============================================================================
-# Body cleaning (Phase 5)
-# =============================================================================
-
 
 @pytest.mark.unit
 class TestCleanBodyTop:
@@ -68,11 +64,6 @@ class TestCleanBodyTop:
         assert OutlookBridge._clean_body_top(body) == body
 
 
-# =============================================================================
-# Sender SMTP salvage regex (Phase 2)
-# =============================================================================
-
-
 @pytest.mark.unit
 class TestSmtpRegex:
     def test_extracts_from_angle_brackets(self):
@@ -81,9 +72,9 @@ class TestSmtpRegex:
         assert m.group(0) == "stella.kruit@utwente.nl"
 
     def test_extracts_embedded_smtp(self):
-        assert _SMTP_REGEX.search("SMTP:s.a.kruit@utwente.nl").group(0) == (
-            "s.a.kruit@utwente.nl"
-        )
+        m = _SMTP_REGEX.search("SMTP:s.a.kruit@utwente.nl")
+        assert m is not None
+        assert m.group(0) == "s.a.kruit@utwente.nl"
 
     def test_no_false_positive_on_exchange_dn(self):
         # A bare EX DN has no SMTP-shaped token; salvage must not invent one.
@@ -92,11 +83,6 @@ class TestSmtpRegex:
 
     def test_no_match_plain_text(self):
         assert _SMTP_REGEX.search("just some words") is None
-
-
-# =============================================================================
-# MessageClass filter constant (Phase 1)
-# =============================================================================
 
 
 @pytest.mark.unit

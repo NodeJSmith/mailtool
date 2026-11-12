@@ -35,11 +35,6 @@ MEETING_STATUS_CASES = [
 ]
 
 
-# =============================================================================
-# translate_filter
-# =============================================================================
-
-
 class TestTranslateFilter:
     def test_like_becomes_dasl(self):
         assert (
@@ -163,11 +158,6 @@ class TestTranslateFilter:
         )
 
 
-# =============================================================================
-# Fakes
-# =============================================================================
-
-
 class FakeItems:
     """Minimal stand-in for an Outlook Items collection."""
 
@@ -237,11 +227,6 @@ def make_bridge_with_calendar(items):
     bridge = OutlookBridge.__new__(OutlookBridge)  # skip COM __init__
     bridge.get_calendar = lambda: FakeCalendar(items)
     return bridge, items
-
-
-# =============================================================================
-# search_emails
-# =============================================================================
 
 
 class TestSearchEmailsFilterHandling:
@@ -403,11 +388,6 @@ class TestSearchEmailsFilterHandling:
         events = bridge.list_calendar_events(days=7)
 
         assert len(events) <= 3
-
-
-# =============================================================================
-# _to_naive_datetime / _calendar_range_filter
-# =============================================================================
 
 
 class TestHelpers:

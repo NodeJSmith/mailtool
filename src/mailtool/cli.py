@@ -2,13 +2,16 @@
 Mailtool CLI Entry Point
 Provides platform-specific error handling for Windows-only COM automation.
 
-This module validates the runtime environment before importing the Outlook bridge,
-ensuring users get helpful error messages when running on unsupported platforms.
+The bridge module imports without pywin32, so this module checks the platform and
+pywin32 up front and gives a helpful error instead of a COM failure.
 """
 
 import argparse
+import importlib.util
 import json
 import sys
+
+from mailtool.bridge import OutlookBridge
 
 
 def _check_platform() -> None:
@@ -50,8 +53,6 @@ def _check_pywin32() -> None:
         SystemExit: With error code 1 and helpful message if pywin32 is missing.
     """
     try:
-        import importlib.util
-
         if importlib.util.find_spec("win32com.client") is None:
             raise ImportError()
     except (ImportError, ValueError):
@@ -77,20 +78,14 @@ def main() -> None:
     """
     Main CLI entry point for mailtool.
 
-    Performs platform validation before importing bridge logic,
-    then dispatches commands to the OutlookBridge class.
+    Checks the platform and pywin32, then dispatches commands to the
+    OutlookBridge class.
 
     All commands return JSON output for machine readability.
     Exit code 1 indicates an error.
     """
-    # Platform check - must happen before any Windows-specific imports
     _check_platform()
-
-    # Import validation - check pywin32 availability
     _check_pywin32()
-
-    # Now safe to import the bridge (it uses pywin32)
-    from mailtool.bridge import OutlookBridge
 
     # Set up argument parser
     parser = argparse.ArgumentParser(
