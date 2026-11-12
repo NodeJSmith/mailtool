@@ -44,7 +44,7 @@ def _check_platform() -> None:
             "  - Or use: uv run --with mailtool --no-project mailtool <command>",
             file=sys.stderr,
         )
-        sys.exit(1)
+        fail("mailtool requires Windows with Microsoft Outlook installed")
 
 
 def _check_pywin32() -> None:
@@ -73,7 +73,7 @@ def _check_pywin32() -> None:
         )
         print("\nOr install pywin32 in your environment:", file=sys.stderr)
         print("  uv add pywin32", file=sys.stderr)
-        sys.exit(1)
+        fail("pywin32 is required but not installed")
 
 
 def parse_bool(value: str) -> bool:
@@ -342,8 +342,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.command:
-        parser.print_help()
-        sys.exit(1)
+        parser.print_help(sys.stderr)
+        fail("No command given")
 
     try:
         bridge = OutlookBridge()
