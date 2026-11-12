@@ -49,7 +49,7 @@ for email in bridge.list_emails(limit=5):
 
 ```bash
 uv sync
-uv run pytest -m unit    # Outlook-free tests; the full suite needs Windows + Outlook
+uv run pytest            # live-Outlook tests skip unless on Windows with Outlook
 uv run ruff check .
 uv run ruff format .
 ```
