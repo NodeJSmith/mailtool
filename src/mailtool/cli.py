@@ -31,11 +31,7 @@ def _check_platform() -> None:
         )
         print("For WSL2/Linux users:", file=sys.stderr)
         print(
-            "  - Use the provided wrapper script: ./outlook.sh <command>",
-            file=sys.stderr,
-        )
-        print(
-            "  - The wrapper automatically bridges to Windows Outlook\n",
+            "  - Install mailtool on the Windows side and call it as mailtool.exe\n",
             file=sys.stderr,
         )
         print("For direct Windows access:", file=sys.stderr)
@@ -104,9 +100,7 @@ def main() -> None:
             "Examples:\n"
             "  mailtool emails --limit 10\n"
             "  mailtool calendar --days 7\n"
-            "  mailtool send --to user@example.com --subject 'Hello' --body 'World'\n"
-            "\n"
-            "For WSL2 users, use ./outlook.sh instead of mailtool directly."
+            "  mailtool send --to user@example.com --subject 'Hello' --body 'World'"
         ),
     )
     subparsers = parser.add_subparsers(
@@ -338,15 +332,6 @@ def main() -> None:
     # Delete task command
     del_task_parser = subparsers.add_parser("delete-task", help="Delete a task")
     del_task_parser.add_argument("--id", required=True, help="Task entry ID")
-
-    # MCP server command
-    mcp_parser = subparsers.add_parser("mcp", help="Start the MCP server")
-    mcp_parser.add_argument(
-        "--account",
-        "--acc",
-        dest="account",
-        help="Default account name or email address for Outlook operations",
-    )
 
     args = parser.parse_args()
 
@@ -644,12 +629,6 @@ def main() -> None:
         else:
             print(json.dumps({"status": "error", "message": "Failed to delete task"}))
             sys.exit(1)
-
-    elif args.command == "mcp":
-        from mailtool.mcp.server import main as server_main
-
-        # Pass account directly to server_main (bypasses argparse in server)
-        server_main(default_account=getattr(args, "account", None))
 
 
 if __name__ == "__main__":

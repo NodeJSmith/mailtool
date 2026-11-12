@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 
+## [Unreleased]
+
+### Removed
+
+- **MCP server.** `src/mailtool/mcp/`, the `mailtool-mcp` entry point, the `mailtool mcp`
+  subcommand, and the `mcp` dependency are gone. Nothing used the server, and it carried
+  known bugs (resources dropping newer email metadata, an uncapped `get_emails` batch that
+  could block Outlook's COM apartment). mailtool is now the CLI and library only.
+
 ## [0.12.0] - 2026-08-18
 
  Triage follow-up release: every fix below was found by running an agent-driven

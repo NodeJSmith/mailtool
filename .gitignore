@@ -4,7 +4,6 @@ __pycache__/
 # Development scripts
 gather_daily_data*.py
 gather_daily_data*.txt
-test_mcp_quick.py
 gather_summary_stderr.txt
 scripts/
 

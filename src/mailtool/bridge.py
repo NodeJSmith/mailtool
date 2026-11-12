@@ -90,8 +90,7 @@ DASL_FIELD_MAP = {
 # Maximum horizon (days) used when list_calendar_events(all_events=True) is
 # requested. A truly unbounded scan expands every recurring series forever
 # ("calendar bomb"), blocking Outlook's single-threaded COM apartment for
-# minutes — which wedges the entire MCP server, since every other COM call
-# queues behind it. all_events is therefore capped to a forward 1-year window.
+# minutes, and every other COM call queues behind it. all_events is therefore capped to a forward 1-year window.
 CALENDAR_ALL_EVENTS_MAX_DAYS = 365
 
 # Hard cap on the number of (expanded) occurrences list_calendar_events will
