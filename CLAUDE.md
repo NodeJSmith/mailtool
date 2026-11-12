@@ -21,7 +21,9 @@ upstream, so nothing here publishes.
 - `src/mailtool/bridge.py`: `OutlookBridge`, all COM access. Imports pywin32 defensively so
   its static helpers and constants can be tested on any platform.
 - `src/mailtool/cli.py`: argparse CLI. Checks for Windows and pywin32 first so a bad
-  environment gets a readable error; every command prints JSON and exits 1 on failure.
+  environment gets a readable error (plain text on stderr, exit 1). Past those checks every
+  command prints JSON and exits 1 on failure; argparse usage errors exit 2 with argparse's
+  own text.
 - `tests/`: unit tests (pure Python, fake COM objects) plus integration tests that drive a
   live Outlook through the session-scoped `bridge` fixture in `conftest.py`.
 
@@ -39,8 +41,11 @@ upstream, so nothing here publishes.
 - **Return values.** Failures raise `MailtoolError` (a `RuntimeError`), never an empty
   result or a `False` sentinel, because the consumers are unattended digests that read an
   empty list as "nothing new". Lists return `[]` only when nothing matches; a fetch by an
-  EntryID that doesn't exist returns `None` (not a failure); mutators return `True` and
-  creates return the new EntryID. A list loop may skip one unreadable item (with a stderr
+  EntryID that doesn't exist, or whose item is the wrong type (appointment/task methods check
+  Outlook's `Class`), returns `None` (not a failure). Only Outlook's not-found errors
+  (`NOT_FOUND_HRESULTS`) count as not found; any other lookup error raises, so an Outlook
+  outage can't read as "not found". Mutators return `True` and creates return the new
+  EntryID. A list loop may skip one unreadable item (with a stderr
   warning), but the whole call failing raises. The CLI turns `MailtoolError` (and any other
   exception) into `{"status": "error", "message": ...}` on stdout with exit 1. A sent email
   moves to Sent Items with a new EntryID, so the original can't be returned.

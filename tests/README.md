@@ -1,56 +1,47 @@
 # Test Suite for Mailtool Outlook Bridge
 
-This directory contains integration tests for the mailtool Outlook COM bridge.
+This directory holds two kinds of tests.
 
-## Overview
+## Unit tests (run anywhere)
 
-These tests use **real Outlook data and COM automation** - there is no mocking. The tests are designed to be fast, isolated, and safe to run against your actual Outlook data.
+Pure-Python tests that drive `OutlookBridge` and the CLI through fake COM objects
+(`OutlookBridge.__new__(OutlookBridge)` skips the COM connection, then folders, items and
+namespaces are replaced by small fakes). They need no Outlook and no pywin32, and run on
+Linux in CI. Examples: `test_filters.py`, `test_folder_resolution.py`,
+`test_item_lookup_and_safe_get.py`, `test_fail_loudly.py`, `test_enhancements.py`.
 
-## Key Design Principles
+New unit tests must not request the `bridge` fixture.
 
-1. **Fast Execution**: Tests use a session-scoped bridge instance that is created once and reused
-2. **Warmup Phase**: The bridge warms up the Outlook connection before tests run
-3. **Test Isolation**: Test-created items use a `[TEST]` prefix for easy identification and cleanup
-4. **Real Data**: Tests work with your actual Outlook folders and data
-5. **Defensive**: Tests verify structure and behavior, not specific data content
+## Integration tests (Windows + Outlook)
+
+`test_bridge.py`, `test_emails.py`, `test_calendar.py` and `test_tasks.py` use **real Outlook
+data and COM automation**, with no mocking. They use a session-scoped bridge instance that
+is created once and warmed up before tests run. Any test that requests the `bridge` fixture
+(directly or through another fixture) is marked `windows` automatically by `conftest.py` and
+skipped where pywin32 isn't available, so no manual marker is needed.
+
+Key design principles:
+
+1. **Fast execution**: one bridge for the whole session
+2. **Warmup phase**: the connection to Outlook is warmed up before tests run
+3. **Test isolation**: test-created items use a `[TEST]` prefix for identification and cleanup
+4. **Real data**: tests work with your actual Outlook folders
+5. **Defensive**: tests verify structure and behavior, not specific data content
 
 ## Running Tests
 
-### From WSL2
 ```bash
-# Run all tests with default settings
-./run_tests.sh
-
-# Run specific test file
-./run_tests.sh tests/test_emails.py
-
-# Run specific test
-./run_tests.sh tests/test_emails.py::TestEmails::test_create_draft_email
-
-# Run with verbose output
-./run_tests.sh -v -s
-
-# Run only quick tests (skip slow ones)
-./run_tests.sh -m "not slow"
-
-# Run only email tests
-./run_tests.sh -m email
+uv run pytest                      # everything; live-Outlook tests skip off Windows
+uv run pytest -m unit              # only the pure-Python unit tests
+uv run pytest -m windows           # only the live-Outlook tests (Windows + Outlook running)
+uv run pytest -m "windows and not slow"
+uv run pytest -m email             # one feature area (also: calendar, tasks)
+uv run pytest tests/test_emails.py::TestEmails::test_create_draft_email
 ```
 
-### From Windows
-```cmd
-REM Run all tests
-run_tests.bat
-
-REM Run with specific pytest arguments
-run_tests.bat -v -s tests/test_bridge.py
-```
-
-### Direct with uv (Windows)
-```cmd
-cd /path/to/mailtool
-uv run --with pywin32 --with pytest pytest
-```
+On Windows, run the live tests from a shell with Outlook open, with pywin32 available
+(`uv run --with pywin32 pytest -m windows`). COM is apartment-threaded, so don't run the
+integration tests in parallel.
 
 ## Test Structure
 
@@ -181,7 +172,9 @@ class TestMyNewFeature:
 
 For CI/CD pipelines:
 
+The unit tests run in CI (`tests.yml`, ubuntu). The live-Outlook tests have no hosted CI; to run them on an agent:
+
 1. Ensure Outlook is installed on the CI agent
 2. Use a dedicated test account or Outlook profile
-3. Run tests with: `./run_tests.sh -x -v` (fail fast, verbose)
+3. Run tests with: `uv run pytest -m windows -x` (fail fast)
 4. Consider increasing timeouts for slower CI environments

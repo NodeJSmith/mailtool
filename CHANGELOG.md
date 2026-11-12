@@ -14,7 +14,9 @@ All notable changes to this project are documented here. The format is based on
   stderr and return `[]`, `False`, or `None`. A fetch by an EntryID that doesn't exist still
   returns `None`; mutators return `True` and raise on failure (including an item that
   doesn't exist). The CLI prints `{"status": "error", "message": ...}` on stdout and exits 1
-  for every failure, including unexpected exceptions. An unknown `--folder` now fails instead
+  for every failure, including unexpected exceptions. `get_item_by_id` returns `None` only
+  for Outlook's not-found errors and raises on any other lookup failure; folder lookups
+  raise when the lookup itself fails instead of reporting "not found". An unknown `--folder` now fails instead
   of silently falling back to the Inbox, and a failed attachment add aborts the send.
 
 ### Removed
