@@ -11,6 +11,7 @@ import importlib.util
 import json
 import sys
 import traceback
+from typing import NoReturn
 
 from mailtool.bridge import MailtoolError, OutlookBridge
 
@@ -354,8 +355,9 @@ def main() -> None:
         fail(f"Unexpected error: {type(e).__name__}: {e}")
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     """Print the error JSON on stdout (where consumers parse) and exit 1."""
+    # main() relies on SystemExit not being caught by its `except Exception`.
     print(json.dumps({"status": "error", "message": message}))
     sys.exit(1)
 
@@ -407,8 +409,6 @@ def run_command(bridge: OutlookBridge, args: argparse.Namespace) -> None:
 
     elif args.command == "attachments":
         downloaded = bridge.download_attachments(args.id, args.dir)
-        if not downloaded:
-            fail("No attachments found")
         print(json.dumps({"status": "success", "attachments": downloaded}))
 
     elif args.command == "reply":
@@ -494,9 +494,12 @@ def run_command(bridge: OutlookBridge, args: argparse.Namespace) -> None:
 
     elif args.command == "respond":
         bridge.respond_to_meeting(args.id, args.response)
-        print(
-            json.dumps({"status": "success", "message": f"Meeting {args.response}ed"})
-        )
+        outcome = {
+            "accept": "accepted",
+            "decline": "declined",
+            "tentative": "tentatively accepted",
+        }[args.response]
+        print(json.dumps({"status": "success", "message": f"Meeting {outcome}"}))
 
     elif args.command == "freebusy":
         freebusy = bridge.get_free_busy(

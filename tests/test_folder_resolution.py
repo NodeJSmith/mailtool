@@ -130,10 +130,25 @@ class TestFolderByPath:
         assert _folder_by_path(inbox, ["Databricks Alerts", "Nope"]) is None
 
 
+class FakeNamespace:
+    """Namespace whose Folders lists the account roots."""
+
+    def __init__(self, roots):
+        self.roots = list(roots)
+        self.Folders = self
+
+    @property
+    def Count(self):  # noqa: N802 - mirrors Outlook COM API
+        return len(self.roots)
+
+    def Item(self, i):  # noqa: N802 - mirrors Outlook COM API
+        return self.roots[i - 1]
+
+
 def make_bridge_with_root(root_folder):
     bridge = OutlookBridge.__new__(OutlookBridge)  # skip COM __init__
     bridge._get_root = lambda: root_folder
-    bridge.namespace = FakeFoldersCollection([])  # .Folders.Count -> error path
+    bridge.namespace = FakeNamespace([])
     return bridge
 
 

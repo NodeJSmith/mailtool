@@ -14,7 +14,9 @@ pytestmark = pytest.mark.unit
 
 
 class FakeComError(Exception):
-    """Stands in for pywintypes.com_error."""
+    """Stands in for pywintypes.com_error (here: Outlook's not-found error)."""
+
+    hresult = -2147221233
 
 
 class FakeAppointment:
@@ -72,19 +74,13 @@ def test_edit_appointment_uses_get_item_from_id():
     assert appt.saved is True
 
 
-def test_edit_appointment_unknown_id_raises():
-    bridge = make_bridge({})
-
-    with pytest.raises(MailtoolError, match="Appointment not found: missing"):
-        bridge.edit_appointment("missing", subject="new")
-
-
 def test_edit_appointment_rejects_other_item_types():
     email = FakeAppointment("mail-1")
     email.Class = 43  # olMail
     bridge = make_bridge({"mail-1": email})
 
-    assert bridge.edit_appointment("mail-1", subject="new") is False
+    with pytest.raises(MailtoolError, match="Appointment not found: mail-1"):
+        bridge.edit_appointment("mail-1", subject="new")
 
     assert email.Subject == "old"
     assert email.saved is False

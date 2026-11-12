@@ -20,6 +20,7 @@ import mailtool.bridge as bridge_module
 from mailtool.bridge import (
     CALENDAR_ALL_EVENTS_MAX_DAYS,
     CALENDAR_MAX_ITEMS,
+    MailtoolError,
     OutlookBridge,
     translate_filter,
 )
@@ -214,6 +215,7 @@ def make_appointment(start, end, subject="Test Appointment"):
         ResponseStatus=3,
         MeetingStatus=1,
         ResponseRequested=False,
+        Class=26,
     )
 
 
@@ -253,11 +255,11 @@ class TestSearchEmailsFilterHandling:
         applied = items.restrict_calls[0]
         assert '"urn:schemas:httpmail:read" = 0' in applied
 
-    def test_like_unknown_field_raises_value_error(self):
+    def test_like_unknown_field_raises_mailtool_error(self):
         items = FakeItems()
         bridge, _ = make_bridge_with_inbox(items)
 
-        with pytest.raises(ValueError, match="Cannot translate"):
+        with pytest.raises(MailtoolError, match="Cannot translate"):
             bridge.search_emails("[NoSuchField] LIKE '%x%'", limit=5)
         assert items.restrict_calls == []
 

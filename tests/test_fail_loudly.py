@@ -8,18 +8,44 @@ Pure-Python (fake COM objects, no Outlook / pywin32 required).
 
 import json
 import sys
-from typing import ClassVar
 
 import pytest
 
 from mailtool import cli
-from mailtool.bridge import MailtoolError, OutlookBridge
+from mailtool.bridge import MailtoolError, OutlookBridge, _com_operation
 
 pytestmark = pytest.mark.unit
 
 
 class FakeComError(Exception):
     """Stands in for pywintypes.com_error."""
+
+
+class FakeNotFoundError(FakeComError):
+    """Outlook's "no item has this EntryID" error (MAPI_E_NOT_FOUND)."""
+
+    hresult = -2147221233
+
+
+class FakeWrappedNotFoundError(FakeComError):
+    """The same error as pywin32 usually delivers it: DISP_E_EXCEPTION with the
+    real code in excepinfo[5]."""
+
+    hresult = -2147352567
+    excepinfo = (0, "Microsoft Outlook", "not found", None, 0, -2147221241)
+
+
+class AnyClass:
+    """An Outlook Class value that matches whatever class a method asks for."""
+
+    def __eq__(self, other):
+        return True
+
+    def __ne__(self, other):
+        return False
+
+    def __hash__(self):
+        return 0
 
 
 class FakeItem:
@@ -34,9 +60,10 @@ class FakeItem:
     Body = ""
     DueDate = None
 
-    def __init__(self, fail_on=()):
+    def __init__(self, fail_on=(), olclass=None):
         self.fail_on = set(fail_on)
         self.calls = []
+        self.Class = AnyClass() if olclass is None else olclass
 
     def fail_if_requested(self, name):
         self.calls.append(name)
@@ -60,12 +87,15 @@ class FakeItem:
 
 
 class FakeNamespace:
-    def __init__(self, items):
+    def __init__(self, items, error=None):
         self.items = items
+        self.error = error
 
     def GetItemFromID(self, entry_id):  # noqa: N802 - mirrors Outlook COM API
+        if self.error is not None:
+            raise self.error
         if entry_id not in self.items:
-            raise FakeComError("not found")
+            raise FakeNotFoundError("not found")
         return self.items[entry_id]
 
 
@@ -124,9 +154,9 @@ class BadMail:
         raise ValueError(f"cannot read {name}")
 
 
-def make_bridge(items=None, inbox_items=None, tasks_items=None):
+def make_bridge(items=None, inbox_items=None, tasks_items=None, lookup_error=None):
     bridge = OutlookBridge.__new__(OutlookBridge)
-    bridge.namespace = FakeNamespace(items or {})
+    bridge.namespace = FakeNamespace(items or {}, error=lookup_error)
     bridge.default_account_name = None
     if inbox_items is not None:
         inbox = FakeFolder(inbox_items)
@@ -409,12 +439,16 @@ class TestFreeBusy:
 
 
 class FakeCliBridge:
-    """Bridge double for cli.main: every method named in `behaviors` runs it."""
+    """Bridge double for cli.main: only the methods named in `behaviors` exist."""
 
-    behaviors: ClassVar[dict] = {}
+    def __init__(self, behaviors):
+        self.behaviors = behaviors
 
     def __getattr__(self, name):
-        return self.behaviors[name]
+        behaviors = self.__dict__.get("behaviors", {})
+        if name not in behaviors:
+            raise AttributeError(name)
+        return behaviors[name]
 
 
 @pytest.fixture
@@ -422,9 +456,9 @@ def run_cli(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_check_platform", lambda: None)
     monkeypatch.setattr(cli, "_check_pywin32", lambda: None)
 
-    def run(argv, **behaviors):
-        FakeCliBridge.behaviors = behaviors
-        monkeypatch.setattr(cli, "OutlookBridge", FakeCliBridge)
+    def run(argv, real_bridge=None, **behaviors):
+        bridge = real_bridge or FakeCliBridge(behaviors)
+        monkeypatch.setattr(cli, "OutlookBridge", lambda: bridge)
         monkeypatch.setattr(sys, "argv", ["mailtool", *argv])
         code = 0
         try:
@@ -526,3 +560,390 @@ class TestEditTaskCompleteFlag:
         )
 
         assert code == 2
+
+
+class TestGetItemById:
+    def test_not_found_hresult_returns_none(self):
+        assert make_bridge().get_item_by_id("nope") is None
+
+    def test_not_found_code_in_excepinfo_returns_none(self):
+        bridge = make_bridge(lookup_error=FakeWrappedNotFoundError("wrapped"))
+
+        assert bridge.get_item_by_id("nope") is None
+
+    def test_other_com_error_raises_instead_of_reading_as_not_found(self):
+        error = FakeComError("RPC server unavailable")
+        bridge = make_bridge(lookup_error=error)
+
+        with pytest.raises(MailtoolError, match="Could not look up item x") as exc_info:
+            bridge.get_item_by_id("x")
+
+        assert exc_info.value.__cause__ is error
+
+    def test_outage_propagates_through_getters(self):
+        bridge = make_bridge(lookup_error=FakeComError("outage"))
+
+        with pytest.raises(MailtoolError):
+            bridge.get_email_body("x")
+        with pytest.raises(MailtoolError):
+            bridge.delete_email("x")
+
+    def test_legacy_free_busy_entry_id_not_found_raises(self):
+        bridge = make_bridge()
+
+        with pytest.raises(MailtoolError, match="Item not found: nope"):
+            bridge.get_free_busy(entry_id="nope")
+
+    def test_get_email_bodies_warns_for_each_missing_id(self, capsys):
+        bridge = make_bridge(items={"mail-good": GoodMail()})
+
+        results = bridge.get_email_bodies(["a", "mail-good", "b"], include_body=False)
+
+        assert [r["entry_id"] for r in results] == ["mail-good"]
+        err = capsys.readouterr().err
+        assert "email a: not found" in err
+        assert "email b: not found" in err
+
+    def test_get_email_bodies_raises_on_outage(self):
+        bridge = make_bridge(lookup_error=FakeComError("outage"))
+
+        with pytest.raises(MailtoolError):
+            bridge.get_email_bodies(["a"])
+
+
+class TestItemClassChecks:
+    """An EntryID for the wrong kind of item is treated as not found."""
+
+    OL_MAIL = 43
+
+    @pytest.mark.parametrize("method", ["get_appointment", "get_task"])
+    def test_getter_returns_none_for_wrong_class(self, method):
+        bridge = make_bridge(items={"id-1": FakeItem(olclass=self.OL_MAIL)})
+
+        assert getattr(bridge, method)("id-1") is None
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("edit_appointment", ("id-1", None, None, "new")),
+            ("delete_appointment", ("id-1",)),
+            ("respond_to_meeting", ("id-1", "accept")),
+            ("edit_task", ("id-1", "new")),
+            ("complete_task", ("id-1",)),
+            ("delete_task", ("id-1",)),
+        ],
+    )
+    def test_mutator_raises_for_wrong_class_without_touching_the_item(
+        self, method, args
+    ):
+        item = FakeItem(olclass=self.OL_MAIL)
+        bridge = make_bridge(items={"id-1": item})
+
+        with pytest.raises(MailtoolError, match="not found: id-1"):
+            getattr(bridge, method)(*args)
+
+        assert item.calls == []
+
+    def test_task_class_is_accepted_for_task_methods(self):
+        bridge = make_bridge(items={"id-1": FakeItem(olclass=48)})
+
+        assert bridge.complete_task("id-1") is True
+
+    def test_appointment_class_is_accepted_for_appointment_methods(self):
+        bridge = make_bridge(items={"id-1": FakeItem(olclass=26)})
+
+        assert bridge.delete_appointment("id-1") is True
+
+
+class BrokenFolder:
+    Name = "Broken"
+
+    @property
+    def Folders(self):  # noqa: N802 - mirrors Outlook COM API
+        raise FakeComError("store unavailable")
+
+
+class FakeFolderNode:
+    def __init__(self, name, children=()):
+        self.Name = name
+        self.children = list(children)
+
+    @property
+    def Folders(self):  # noqa: N802 - mirrors Outlook COM API
+        return FakeChildren(self.children)
+
+
+class FakeChildren:
+    def __init__(self, children):
+        self.children = children
+
+    def __getitem__(self, name):
+        for child in self.children:
+            if child.Name == name:
+                return child
+        raise FakeComError("not found")
+
+    def __iter__(self):
+        return iter(self.children)
+
+
+class FakeRoots:
+    def __init__(self, roots):
+        self.roots = roots
+        self.Folders = self
+
+    @property
+    def Count(self):  # noqa: N802 - mirrors Outlook COM API
+        return len(self.roots)
+
+    def Item(self, i):  # noqa: N802 - mirrors Outlook COM API
+        return self.roots[i - 1]
+
+
+class TestFolderLookups:
+    def test_calendar_absent_is_none(self):
+        bridge = make_bridge()
+        bridge._get_root = lambda: FakeFolderNode("root", [FakeFolderNode("Inbox")])
+        bridge.namespace = FakeRoots([])
+
+        assert bridge.get_calendar() is None
+
+    def test_calendar_found_case_insensitively(self):
+        calendar = FakeFolderNode("calendar")
+        bridge = make_bridge()
+        bridge._get_root = lambda: FakeFolderNode("root", [calendar])
+
+        assert bridge.get_calendar() is calendar
+
+    def test_calendar_busy_outlook_raises_instead_of_not_found(self):
+        bridge = make_bridge()
+        bridge._get_root = lambda: BrokenFolder()
+
+        with pytest.raises(MailtoolError, match="Could not list subfolders") as exc:
+            bridge.get_calendar()
+
+        assert isinstance(exc.value.__cause__, FakeComError)
+
+    def test_calendar_root_listing_failure_raises(self):
+        class DeadNamespace:
+            @property
+            def Folders(self):  # noqa: N802 - mirrors Outlook COM API
+                raise FakeComError("outage")
+
+        bridge = make_bridge()
+        bridge._get_root = lambda: None
+        bridge.namespace = DeadNamespace()
+
+        with pytest.raises(MailtoolError, match="list account roots"):
+            bridge.get_calendar()
+
+    def test_tasks_and_inbox_default_folder_failure_raises(self):
+        class DeadNamespace:
+            def GetDefaultFolder(self, _kind):  # noqa: N802 - mirrors Outlook COM API
+                raise FakeComError("outage")
+
+        bridge = make_bridge()
+        bridge._get_root = lambda: None
+        bridge.namespace = DeadNamespace()
+
+        with pytest.raises(MailtoolError, match="Tasks folder"):
+            bridge.get_tasks()
+        with pytest.raises(MailtoolError, match="Inbox folder"):
+            bridge.get_inbox()
+
+    def test_failing_account_root_is_warned_and_raises_when_nothing_found(self, capsys):
+        bridge = make_bridge()
+        bridge._get_root = lambda: None
+        bridge.namespace = FakeRoots([BrokenFolder()])
+
+        with pytest.raises(MailtoolError, match="account root failed"):
+            bridge.get_folder_by_name("Archive")
+
+        assert "skipped account root 1" in capsys.readouterr().err
+
+    def test_failing_account_root_ignored_when_folder_found_elsewhere(self):
+        archive = FakeFolderNode("Archive")
+        bridge = make_bridge()
+        bridge._get_root = lambda: None
+        bridge.namespace = FakeRoots(
+            [BrokenFolder(), FakeFolderNode("acct", [archive])]
+        )
+
+        assert bridge.get_folder_by_name("Archive") is archive
+
+    def test_failing_subtree_warns_and_raises_when_folder_not_found(self, capsys):
+        root = FakeFolderNode("root", [BrokenFolder(), FakeFolderNode("Other")])
+        bridge = make_bridge()
+        bridge._get_root = lambda: root
+
+        with pytest.raises(MailtoolError, match="could not be searched"):
+            bridge.get_folder_by_name("Archive")
+
+        assert "can't be listed" in capsys.readouterr().err
+
+    def test_failing_subtree_ignored_when_folder_found(self):
+        archive = FakeFolderNode("Archive")
+        root = FakeFolderNode("root", [archive, BrokenFolder()])
+        bridge = make_bridge()
+        bridge._get_root = lambda: root
+
+        assert bridge.get_folder_by_name("Archive") is archive
+
+    def test_path_lookup_failure_raises(self):
+        root = FakeFolderNode("root", [BrokenFolder()])
+        bridge = make_bridge()
+        bridge._get_root = lambda: root
+
+        with pytest.raises(MailtoolError):
+            bridge.get_folder_by_name("Broken\\Child")
+
+
+class FakeAccountFolder:
+    """An account root with one child folder, shaped for list_folders."""
+
+    def __init__(self, name):
+        self.Name = name
+        self.EntryID = f"id-{name}"
+        self.FolderPath = f"\\\\{name}"
+        self.Items = type("I", (), {"Count": 3})()
+        self.Folders = []
+
+
+class TestListFolders:
+    def test_lists_every_account_not_just_the_first_six(self):
+        bridge = make_bridge()
+        bridge.namespace = FakeRoots([FakeAccountFolder(f"acct{i}") for i in range(8)])
+
+        result = bridge.list_folders()
+
+        assert len(result) == 8
+
+    def test_unknown_account_raises(self):
+        bridge = make_bridge()
+        bridge.namespace = FakeRoots([FakeAccountFolder("work")])
+
+        with pytest.raises(MailtoolError, match="Account not found: nope"):
+            bridge.list_folders("nope")
+
+    def test_filters_to_the_named_account(self):
+        bridge = make_bridge()
+        bridge.namespace = FakeRoots(
+            [FakeAccountFolder("work"), FakeAccountFolder("home")]
+        )
+
+        assert list(bridge.list_folders("home")) == ["home"]
+
+    def test_failure_raises(self):
+        bridge = make_bridge()
+        bridge.namespace = FakeRoots([BrokenFolder()])
+
+        with pytest.raises(MailtoolError, match="list folders"):
+            bridge.list_folders()
+
+    def test_cli_folders_stdout_is_pure_json(self, run_cli):
+        bridge = make_bridge()
+        bridge.namespace = FakeRoots([FakeAccountFolder("work")])
+
+        code, out, _ = run_cli(["folders"], real_bridge=bridge)
+
+        assert code == 0
+        assert list(json.loads(out)) == ["work"]
+
+
+class TestSearchEmailsErrors:
+    def test_items_access_failure_raises_mailtool_error(self):
+        class BrokenFolderItems:
+            @property
+            def Items(self):  # noqa: N802 - mirrors Outlook COM API
+                raise FakeComError("items unavailable")
+
+        bridge = make_bridge()
+        bridge.get_inbox = lambda: BrokenFolderItems()
+
+        with pytest.raises(MailtoolError, match="search emails"):
+            bridge.search_emails("[Unread] = TRUE")
+
+    def test_untranslatable_like_field_raises_mailtool_error(self):
+        bridge = make_bridge(inbox_items=ListItems([]))
+
+        with pytest.raises(MailtoolError, match="Cannot translate"):
+            bridge.search_emails("[NoSuchField] LIKE '%x%'")
+
+    def test_missing_inbox_raises(self):
+        bridge = make_bridge()
+        bridge.get_inbox = lambda: None
+
+        with pytest.raises(MailtoolError, match="Inbox folder not found"):
+            bridge.search_emails("")
+
+
+class TestMailOnlyFallback:
+    def test_failed_restrict_warns_and_returns_unfiltered_items(self, capsys):
+        items = ExplodingItems()
+
+        result = OutlookBridge.restrict_to_mail(items, include_non_mail=False)
+
+        assert result is items
+        assert "mail-only filter failed" in capsys.readouterr().err
+
+    def test_include_non_mail_skips_the_filter(self):
+        items = ExplodingItems()
+
+        assert OutlookBridge.restrict_to_mail(items, include_non_mail=True) is items
+
+
+class TestComOperation:
+    def test_mailtool_error_passes_through_unwrapped(self):
+        original = MailtoolError("specific message")
+
+        with (
+            pytest.raises(MailtoolError) as exc_info,
+            _com_operation("outer"),
+            _com_operation("inner"),
+        ):
+            raise original
+
+        assert exc_info.value is original
+
+    def test_other_exceptions_are_wrapped_and_chained(self):
+        cause = FakeComError("boom")
+
+        with (
+            pytest.raises(MailtoolError, match="doing x failed: boom") as exc_info,
+            _com_operation("doing x"),
+        ):
+            raise cause
+
+        assert exc_info.value.__cause__ is cause
+
+
+class TestCliExtras:
+    def test_email_with_no_attachments_is_success(self, run_cli):
+        code, out, _ = run_cli(
+            ["attachments", "--id", "x", "--dir", "/tmp/out"],
+            download_attachments=lambda *_a: [],
+        )
+
+        assert code == 0
+        assert json.loads(out) == {"status": "success", "attachments": []}
+
+    @pytest.mark.parametrize(
+        ("response", "message"),
+        [
+            ("accept", "Meeting accepted"),
+            ("decline", "Meeting declined"),
+            ("tentative", "Meeting tentatively accepted"),
+        ],
+    )
+    def test_respond_message(self, run_cli, response, message):
+        code, out, _ = run_cli(
+            ["respond", "--id", "x", "--response", response],
+            respond_to_meeting=lambda *_a: True,
+        )
+
+        assert code == 0
+        assert json.loads(out)["message"] == message
+
+    def test_unconfigured_bridge_method_raises_attribute_error(self):
+        with pytest.raises(AttributeError):
+            FakeCliBridge({}).list_emails()
