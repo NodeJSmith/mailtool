@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Mailtool CLI Entry Point
 Provides platform-specific error handling for Windows-only COM automation.

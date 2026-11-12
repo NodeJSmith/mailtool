@@ -56,7 +56,11 @@ uv run pytest                 # full suite; needs Windows with Outlook running
 ## Development
 
 ```bash
+mise install                              # prek, python, uv
 uv sync
-uv run ruff check .
-uv run ruff format .
+prek install                              # pre-commit + pre-push hooks
+prek run --all-files                      # everything CI's lint job runs
 ```
+
+Hooks live in `prek.toml`; Renovate (self-hosted, `renovate.json`) keeps their revs and the
+locked dependencies current.
