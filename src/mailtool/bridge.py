@@ -35,6 +35,19 @@ except ImportError:
     # OutlookBridge still requires pywin32 + a running Outlook on Windows.
     win32com = None
 
+try:
+    import pywintypes
+except ImportError:
+    pywintypes = None
+
+# Exception types a COM attribute read can legitimately raise: a COM failure
+# (pywintypes.com_error, when pywin32 is present) or a missing attribute.
+# Anything else (e.g. a TypeError from a coding mistake) is a real defect and
+# should propagate rather than look like an empty field.
+COM_ATTR_ERRORS: tuple[type[BaseException], ...] = (
+    (pywintypes.com_error, AttributeError) if pywintypes else (AttributeError,)
+)
+
 # Regex used to salvage an SMTP address out of a raw Exchange DN or display string
 # when both GetExchangeUser() and the PropertyAccessor lookup fail.
 _SMTP_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -61,6 +74,10 @@ FOLDER_SEARCH_MAX_DEPTH = 8
 # levels can still visit all of them, and each visit is a synchronous COM
 # call on the main thread. This caps the worst case regardless of shape.
 FOLDER_SEARCH_MAX_VISITED = 500
+
+# Outlook OlObjectClass values used to check that an EntryID points at the
+# kind of item the caller expects.
+OL_APPOINTMENT = 26
 
 # Outlook OlResponseStatus enum.
 RESPONSE_STATUS_LABELS = {
@@ -310,8 +327,7 @@ class OutlookBridge:
         """
         try:
             return getattr(obj, attr, default)
-        # Catch pywintypes.com_error if available, otherwise fall back to Exception
-        except Exception:
+        except COM_ATTR_ERRORS:
             return default
 
     def __init__(self, default_account: str | None = None):
@@ -1516,32 +1532,30 @@ class OutlookBridge:
             body: New body (optional)
 
         Returns:
-            True if successful
+            True if successful, False if the ID is not an appointment
         """
         try:
-            calendar = self.get_calendar()
-            if calendar is None:
-                print("Error editing appointment: calendar not found", file=sys.stderr)
+            item = self.get_item_by_id(entry_id)
+            # An EntryID for another item type (an email's, say) must not be
+            # edited as if it were an appointment.
+            if item is None or self._safe_get_attr(item, "Class") != OL_APPOINTMENT:
                 return False
-            for item in calendar.Items:
-                if item.EntryID == entry_id:
-                    if required_attendees:
-                        item.RequiredAttendees = required_attendees
-                    if optional_attendees:
-                        item.OptionalAttendees = optional_attendees
-                    if subject:
-                        item.Subject = subject
-                    if start:
-                        item.Start = datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
-                    if end:
-                        item.End = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
-                    if location is not None:
-                        item.Location = location
-                    if body is not None:
-                        item.Body = body
-                    item.Save()
-                    return True
-            return False
+            if required_attendees:
+                item.RequiredAttendees = required_attendees
+            if optional_attendees:
+                item.OptionalAttendees = optional_attendees
+            if subject:
+                item.Subject = subject
+            if start:
+                item.Start = datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
+            if end:
+                item.End = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
+            if location is not None:
+                item.Location = location
+            if body is not None:
+                item.Body = body
+            item.Save()
+            return True
         except Exception as e:
             print(f"Error editing appointment: {e}", file=sys.stderr)
             return False
