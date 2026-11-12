@@ -26,6 +26,14 @@ from mailtool.bridge import (
 
 pytestmark = pytest.mark.unit
 
+MEETING_STATUS_CASES = [
+    (0, "NonMeeting"),
+    (1, "Meeting"),
+    (3, "Received"),
+    (5, "Canceled"),
+    (7, "ReceivedAndCanceled"),
+]
+
 
 # =============================================================================
 # translate_filter
@@ -442,3 +450,29 @@ class TestHelpers:
     def test_calendar_constants_sane(self):
         assert CALENDAR_ALL_EVENTS_MAX_DAYS == 365
         assert CALENDAR_MAX_ITEMS >= 100
+
+
+class TestMeetingStatusLabels:
+    """Outlook OlMeetingStatus values: 0, 1, 3, 5, 7 (there is no 2)."""
+
+    @pytest.mark.parametrize(("raw", "label"), MEETING_STATUS_CASES)
+    def test_list_calendar_events(self, raw, label):
+        now = datetime.now()
+        item = make_appointment(now + timedelta(hours=1), now + timedelta(hours=2))
+        item.MeetingStatus = raw
+        bridge, _ = make_bridge_with_calendar(FakeItems([item]))
+
+        events = bridge.list_calendar_events(days=1)
+
+        assert [e["meeting_status"] for e in events] == [label]
+
+    @pytest.mark.parametrize(("raw", "label"), MEETING_STATUS_CASES)
+    def test_get_appointment(self, raw, label):
+        now = datetime.now()
+        item = make_appointment(now, now + timedelta(hours=1))
+        item.MeetingStatus = raw
+        item.Body = ""
+        bridge = OutlookBridge.__new__(OutlookBridge)  # skip COM __init__
+        bridge.get_item_by_id = lambda entry_id: item
+
+        assert bridge.get_appointment(item.EntryID)["meeting_status"] == label
