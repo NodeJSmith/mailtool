@@ -751,17 +751,24 @@ class OutlookBridge:
         target_name = path_parts[0]
 
         root = self._get_root()
+        root_error = None
         if root:
-            found = _find_folder_by_name(
-                root,
-                target_name,
-                FOLDER_SEARCH_MAX_DEPTH,
-                max_visited=FOLDER_SEARCH_MAX_VISITED,
-            )
-            if found:
-                return found
+            # A failed search of the preferred root mustn't stop the other
+            # accounts from being searched; it's raised only if none has it.
+            try:
+                found = _find_folder_by_name(
+                    root,
+                    target_name,
+                    FOLDER_SEARCH_MAX_DEPTH,
+                    max_visited=FOLDER_SEARCH_MAX_VISITED,
+                )
+            except MailtoolError as e:
+                root_error = e
+            else:
+                if found:
+                    return found
 
-        return self.search_account_roots(
+        found = self.search_account_roots(
             lambda parent: _find_folder_by_name(
                 parent,
                 target_name,
@@ -769,6 +776,9 @@ class OutlookBridge:
                 max_visited=FOLDER_SEARCH_MAX_VISITED,
             )
         )
+        if found is None and root_error is not None:
+            raise root_error
+        return found
 
     def _resolve_folder(self, folder):
         """

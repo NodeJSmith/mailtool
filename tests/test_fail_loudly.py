@@ -792,10 +792,20 @@ class TestFolderLookups:
 
         assert bridge.get_folder_by_name("Archive") is archive
 
+    def test_failing_preferred_root_still_searches_other_accounts(self):
+        archive = FakeFolderNode("Archive")
+        preferred = FakeFolderNode("preferred", [BrokenFolder()])
+        bridge = make_bridge()
+        bridge._get_root = lambda: preferred
+        bridge.namespace = FakeRoots([preferred, FakeFolderNode("acct", [archive])])
+
+        assert bridge.get_folder_by_name("Archive") is archive
+
     def test_failing_subtree_warns_and_raises_when_folder_not_found(self, capsys):
         root = FakeFolderNode("root", [BrokenFolder(), FakeFolderNode("Other")])
         bridge = make_bridge()
         bridge._get_root = lambda: root
+        bridge.namespace = FakeRoots([])
 
         with pytest.raises(MailtoolError, match="could not be searched"):
             bridge.get_folder_by_name("Archive")
