@@ -4,8 +4,6 @@ Email functionality tests.
 Tests for listing, retrieving, creating, and managing emails.
 """
 
-# Modified to test pre-commit hook
-
 import pytest
 
 from .conftest import TEST_PREFIX, assert_email_structure, assert_valid_entry_id

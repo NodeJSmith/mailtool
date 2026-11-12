@@ -20,8 +20,8 @@ upstream, so nothing here publishes.
 
 - `src/mailtool/bridge.py`: `OutlookBridge`, all COM access. Imports pywin32 defensively so
   its static helpers and constants can be tested on any platform.
-- `src/mailtool/cli.py`: argparse CLI. Checks for Windows and pywin32 before importing the
-  bridge; every command prints JSON and exits 1 on failure.
+- `src/mailtool/cli.py`: argparse CLI. Checks for Windows and pywin32 first so a bad
+  environment gets a readable error; every command prints JSON and exits 1 on failure.
 - `tests/`: unit tests (pure Python, fake COM objects) plus integration tests that drive a
   live Outlook through the session-scoped `bridge` fixture in `conftest.py`.
 

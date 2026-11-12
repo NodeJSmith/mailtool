@@ -5,23 +5,13 @@ This module provides shared fixtures and test utilities for testing the Outlook 
 All tests use real Outlook data - no mocking.
 """
 
-# Modified to test pre-commit hook
-
-import sys
 import time
 import uuid
-from pathlib import Path
-
-# Add src directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from datetime import datetime, timedelta
 
 import pytest
 
 from mailtool.bridge import OutlookBridge
-
-# =============================================================================
-# Test Configuration
-# =============================================================================
 
 # Prefix for all test-created items (enables easy identification and cleanup)
 TEST_PREFIX = "[TEST] "
@@ -30,11 +20,6 @@ TEST_PREFIX = "[TEST] "
 WARMUP_TIMEOUT = 30
 WARMUP_ATTEMPTS = 5
 WARMUP_DELAY = 0.5
-
-
-# =============================================================================
-# Session-scoped Fixtures (created once per test run)
-# =============================================================================
 
 
 @pytest.fixture(scope="session")
@@ -79,11 +64,6 @@ def bridge():
     print("\n" + "=" * 70)
     print("TEARDOWN: Bridge session complete")
     print("=" * 70)
-
-
-# =============================================================================
-# Function-scoped Fixtures (created for each test)
-# =============================================================================
 
 
 @pytest.fixture
@@ -215,8 +195,6 @@ def sample_calendar_data(bridge, cleanup_helpers):
     Creates a sample calendar event for testing.
     Automatically cleans up after the test.
     """
-    from datetime import datetime, timedelta
-
     test_unique = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
     subject = f"{TEST_PREFIX}Sample Event {test_unique}"
 
@@ -243,8 +221,6 @@ def sample_task_data(bridge, cleanup_helpers):
     Creates a sample task for testing.
     Automatically cleans up after the test.
     """
-    from datetime import datetime, timedelta
-
     test_unique = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
     subject = f"{TEST_PREFIX}Sample Task {test_unique}"
 
@@ -258,11 +234,6 @@ def sample_task_data(bridge, cleanup_helpers):
 
     # Cleanup
     cleanup_helpers["delete_tasks_by_prefix"](TEST_PREFIX)
-
-
-# =============================================================================
-# Test Helper Functions
-# =============================================================================
 
 
 def assert_valid_entry_id(entry_id):

@@ -32,6 +32,8 @@ mailtool = "mailtool.cli:main"
 
 [dependency-groups]
 dev = [
+    "house-lint>=0.3.0",
+    "pyright>=1.1.400",
     "pytest>=9.0.0",
     "ruff>=0.9.0",
 ]
@@ -126,3 +128,10 @@ docstring-code-line-length = "dynamic"
 
 [tool.ruff.lint.isort]
 known-first-party = ["mailtool"]
+
+[tool.house-lint]
+include = ["src", "tests"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
