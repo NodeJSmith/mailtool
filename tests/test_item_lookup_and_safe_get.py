@@ -97,13 +97,17 @@ def test_safe_get_attr_returns_default_for_attribute_error():
 
 
 def test_safe_get_attr_returns_default_for_com_error(monkeypatch):
-    monkeypatch.setattr(bridge_module, "COM_ATTR_ERRORS", (FakeComError, AttributeError))
+    monkeypatch.setattr(
+        bridge_module, "COM_ATTR_ERRORS", (FakeComError, AttributeError)
+    )
     obj = RaisingObj(FakeComError("com failure"))
 
     assert OutlookBridge._safe_get_attr(obj, "Field", "dflt") == "dflt"
 
 
-@pytest.mark.parametrize("exc", [TypeError("bug"), ValueError("bug"), RuntimeError("bug")])
+@pytest.mark.parametrize(
+    "exc", [TypeError("bug"), ValueError("bug"), RuntimeError("bug")]
+)
 def test_safe_get_attr_propagates_unexpected_errors(exc):
     obj = RaisingObj(exc)
 
@@ -112,7 +116,7 @@ def test_safe_get_attr_propagates_unexpected_errors(exc):
 
 
 def test_safe_get_attr_returns_real_value():
-    obj = RaisingObj(AttributeError())
-    obj.Present = 5
+    class HasValue:
+        Present = 5
 
-    assert OutlookBridge._safe_get_attr(obj, "Present", 0) == 5
+    assert OutlookBridge._safe_get_attr(HasValue(), "Present", 0) == 5
