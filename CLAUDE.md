@@ -2,6 +2,7 @@
 audience: personal tool
 developers: solo
 data-sensitivity: internal
+peers: exchangelib, python-o365 (O365), pywin32 Outlook examples
 ---
 
 # mailtool: Outlook COM Automation Bridge
