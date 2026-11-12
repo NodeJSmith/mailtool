@@ -395,6 +395,49 @@ class TestCreateAndSend:
             bridge.create_appointment("s", "not a date", "also not")
 
 
+class FakeReplyableMail(FakeItem):
+    """A received email whose Reply/ReplyAll hand back a FakeMail to inspect."""
+
+    def __init__(self, reply_fail_on=()):
+        super().__init__()
+        self.replies = []
+        self.reply_fail_on = reply_fail_on
+
+    def make_reply(self, kind):
+        self.calls.append(kind)
+        reply = FakeMail(fail_on=self.reply_fail_on)
+        self.replies.append(reply)
+        return reply
+
+    def Reply(self):  # noqa: N802 - mirrors Outlook COM API
+        return self.make_reply("Reply")
+
+    def ReplyAll(self):  # noqa: N802 - mirrors Outlook COM API
+        return self.make_reply("ReplyAll")
+
+
+class TestReplyEmail:
+    @pytest.mark.parametrize(
+        ("reply_all", "kind"), [(False, "Reply"), (True, "ReplyAll")]
+    )
+    def test_reply_sets_body_and_sends(self, reply_all, kind):
+        original = FakeReplyableMail()
+        bridge = make_bridge(items={"id-1": original})
+
+        assert bridge.reply_email("id-1", "reply body", reply_all=reply_all) is True
+
+        assert original.calls == [kind]
+        (reply,) = original.replies
+        assert reply.Body == "reply body"
+        assert reply.calls == ["Send"]
+
+    def test_reply_send_failure_raises(self):
+        bridge = make_bridge(items={"id-1": FakeReplyableMail(reply_fail_on=["Send"])})
+
+        with pytest.raises(MailtoolError, match="reply to email"):
+            bridge.reply_email("id-1", "reply body")
+
+
 class TestNotFoundReturnsNone:
     def test_get_email_body_missing_is_none(self):
         assert make_bridge().get_email_body("nope") is None
