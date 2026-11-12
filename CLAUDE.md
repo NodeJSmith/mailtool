@@ -22,9 +22,11 @@ upstream, so nothing here publishes.
 - `src/mailtool/bridge.py`: `OutlookBridge`, all COM access. Imports pywin32 defensively so
   its static helpers and constants can be tested on any platform.
 - `src/mailtool/cli.py`: argparse CLI. Checks for Windows and pywin32 first so a bad
-  environment gets a readable error (plain text on stderr, exit 1). Past those checks every
-  command prints JSON and exits 1 on failure; argparse usage errors exit 2 with argparse's
-  own text.
+  environment gets a readable error (help text on stderr, error JSON on stdout, exit 1).
+  stdout carries only JSON: every command prints its result or `{"status": "error", ...}`
+  there and exits 1 on failure, and warnings go to stderr (`test_stdout_contract.py` fails on
+  a bare `print` that isn't JSON). argparse usage errors are the exception: exit 2, text on
+  stderr, nothing on stdout.
 - `tests/`: unit tests (pure Python, fake COM objects) plus integration tests that drive a
   live Outlook through the session-scoped `bridge` fixture in `conftest.py`.
 
