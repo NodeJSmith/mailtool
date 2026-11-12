@@ -2,6 +2,7 @@
 audience: personal tool
 developers: solo
 data-sensitivity: internal
+peers: exchangelib, python-o365 (O365), pywin32 Outlook examples
 ---
 
 # mailtool: Outlook COM Automation Bridge
@@ -21,7 +22,9 @@ upstream, so nothing here publishes.
 - `src/mailtool/bridge.py`: `OutlookBridge`, all COM access. Imports pywin32 defensively so
   its static helpers and constants can be tested on any platform.
 - `src/mailtool/cli.py`: argparse CLI. Checks for Windows and pywin32 first so a bad
-  environment gets a readable error; every command prints JSON and exits 1 on failure.
+  environment gets a readable error (plain text on stderr, exit 1). Past those checks every
+  command prints JSON and exits 1 on failure; argparse usage errors exit 2 with argparse's
+  own text.
 - `tests/`: unit tests (pure Python, fake COM objects) plus integration tests that drive a
   live Outlook through the session-scoped `bridge` fixture in `conftest.py`.
 
@@ -36,9 +39,18 @@ upstream, so nothing here publishes.
 - **Filters.** `Items.Restrict` speaks Jet, which has no LIKE. Filters containing LIKE are
   translated to DASL (`@SQL=`) through a verified field map in `bridge.py`.
 - **Free/busy** takes an email address directly and defaults to the current user.
-- **Return values.** Draft emails return the EntryID; sent emails return `True`; failures
-  return `False`; get operations return a `dict` or `None`. A sent email moves to Sent Items
-  with a new EntryID, so the original can't be returned.
+- **Return values.** Failures raise `MailtoolError` (a `RuntimeError`), never an empty
+  result or a `False` sentinel, because the consumers are unattended digests that read an
+  empty list as "nothing new". Lists return `[]` only when nothing matches; a fetch by an
+  EntryID that doesn't exist returns `None` (not a failure), and so does the wrong item type,
+  but only appointment and task methods check Outlook's `Class`; email methods accept any
+  item. Only Outlook's not-found errors
+  (`NOT_FOUND_HRESULTS`) count as not found; any other lookup error raises, so an Outlook
+  outage can't read as "not found". Mutators return `True` and creates return the new
+  EntryID. A list loop may skip one unreadable item (with a stderr
+  warning), but the whole call failing raises. The CLI turns `MailtoolError` (and any other
+  exception) into `{"status": "error", "message": ...}` on stdout with exit 1. A sent email
+  moves to Sent Items with a new EntryID, so the original can't be returned.
 
 ## Testing
 

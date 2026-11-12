@@ -10,8 +10,10 @@ import argparse
 import importlib.util
 import json
 import sys
+import traceback
+from typing import NoReturn
 
-from mailtool.bridge import OutlookBridge
+from mailtool.bridge import MailtoolError, OutlookBridge
 
 
 def _check_platform() -> None:
@@ -72,6 +74,16 @@ def _check_pywin32() -> None:
         print("\nOr install pywin32 in your environment:", file=sys.stderr)
         print("  uv add pywin32", file=sys.stderr)
         sys.exit(1)
+
+
+def parse_bool(value: str) -> bool:
+    """argparse type for true/false flags (type=bool would make "false" True)."""
+    lowered = value.strip().lower()
+    if lowered in ("true", "yes", "1"):
+        return True
+    if lowered in ("false", "no", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got {value!r}")
 
 
 def main() -> None:
@@ -314,7 +326,7 @@ def main() -> None:
         "--percent", type=int, choices=range(0, 101), help="Percent complete (0-100)"
     )
     edit_task_parser.add_argument(
-        "--complete", type=bool, help="Mark complete/incomplete (true/false)"
+        "--complete", type=parse_bool, help="Mark complete/incomplete (true/false)"
     )
 
     # Complete task command
@@ -333,29 +345,43 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    # Initialize bridge (will connect to Outlook)
-    bridge = OutlookBridge()
+    try:
+        bridge = OutlookBridge()
+        run_command(bridge, args)
+    except MailtoolError as e:
+        fail(str(e))
+    except Exception as e:
+        traceback.print_exc(file=sys.stderr)
+        fail(f"Unexpected error: {type(e).__name__}: {e}")
 
-    # Command dispatch
+
+def fail(message: str) -> NoReturn:
+    """Print the error JSON on stdout (where consumers parse) and exit 1."""
+    # main() relies on SystemExit not being caught by its `except Exception`.
+    print(json.dumps({"status": "error", "message": message}))
+    sys.exit(1)
+
+
+def run_command(bridge: OutlookBridge, args: argparse.Namespace) -> None:
+    """
+    Run the parsed command against the bridge and print its JSON result.
+
+    Bridge failures raise MailtoolError; main() turns that into the error
+    JSON. A fetch that finds nothing (None) is reported here as not found.
+    """
     if args.command == "emails":
         emails = bridge.list_emails(limit=args.limit, folder=args.folder)
         print(json.dumps(emails, indent=2))
 
     elif args.command == "calendar":
-        try:
-            events = bridge.list_calendar_events(days=args.days, all_events=args.all)
-        except Exception as e:
-            print(json.dumps({"error": str(e)}), file=sys.stderr)
-            sys.exit(1)
+        events = bridge.list_calendar_events(days=args.days, all_events=args.all)
         print(json.dumps(events, indent=2))
 
     elif args.command == "email":
         email = bridge.get_email_body(entry_id=args.id)
-        if email:
-            print(json.dumps(email, indent=2))
-        else:
-            print("Email not found", file=sys.stderr)
-            sys.exit(1)
+        if email is None:
+            fail("Email not found")
+        print(json.dumps(email, indent=2))
 
     elif args.command == "send":
         result = bridge.send_email(
@@ -368,60 +394,33 @@ def main() -> None:
             file_paths=args.attach,
             save_draft=args.draft,
         )
-        if result:
-            if args.draft:
-                print(
-                    json.dumps(
-                        {
-                            "status": "success",
-                            "entry_id": result,
-                            "message": "Draft saved",
-                        }
-                    )
-                )
-            else:
-                print(json.dumps({"status": "success", "message": "Email sent"}))
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to send email"}))
-            sys.exit(1)
-
-    elif args.command == "attachments":
-        downloaded = bridge.download_attachments(args.id, args.dir)
-        if downloaded:
-            print(json.dumps({"status": "success", "attachments": downloaded}))
-        else:
+        if args.draft:
             print(
                 json.dumps(
                     {
-                        "status": "error",
-                        "message": "No attachments found or failed to download",
+                        "status": "success",
+                        "entry_id": result,
+                        "message": "Draft saved",
                     }
                 )
             )
-            sys.exit(1)
+        else:
+            print(json.dumps({"status": "success", "message": "Email sent"}))
+
+    elif args.command == "attachments":
+        downloaded = bridge.download_attachments(args.id, args.dir)
+        print(json.dumps({"status": "success", "attachments": downloaded}))
 
     elif args.command == "reply":
-        result = bridge.reply_email(args.id, args.body, reply_all=args.all)
-        if result:
-            print(json.dumps({"status": "success", "message": "Reply sent"}))
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to send reply"}))
-            sys.exit(1)
+        bridge.reply_email(args.id, args.body, reply_all=args.all)
+        print(json.dumps({"status": "success", "message": "Reply sent"}))
 
     elif args.command == "forward":
-        result = bridge.forward_email(args.id, args.to, args.body)
-        if result:
-            print(json.dumps({"status": "success", "message": "Email forwarded"}))
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to forward email"}))
-            sys.exit(1)
+        bridge.forward_email(args.id, args.to, args.body)
+        print(json.dumps({"status": "success", "message": "Email forwarded"}))
 
     elif args.command == "search":
-        try:
-            emails = bridge.search_emails(args.query, limit=args.limit)
-        except Exception as e:
-            print(json.dumps({"error": str(e)}), file=sys.stderr)
-            sys.exit(1)
+        emails = bridge.search_emails(args.query, limit=args.limit)
         print(json.dumps(emails, indent=2))
 
     elif args.command == "folders":
@@ -429,45 +428,25 @@ def main() -> None:
         print(json.dumps(folders, indent=2))
 
     elif args.command == "set-account":
-        ok = bridge.set_default_account(args.name)
-        if ok:
-            print(json.dumps({"status": "success", "account": args.name}))
-        else:
-            print(json.dumps({"status": "error", "message": "Account not found"}))
-            sys.exit(1)
+        bridge.set_default_account(args.name)
+        print(json.dumps({"status": "success", "account": args.name}))
 
     elif args.command == "mark":
-        result = bridge.mark_email_read(args.id, unread=args.unread)
-        if result:
-            status = "unread" if args.unread else "read"
-            print(
-                json.dumps(
-                    {"status": "success", "message": f"Email marked as {status}"}
-                )
-            )
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to mark email"}))
-            sys.exit(1)
+        bridge.mark_email_read(args.id, unread=args.unread)
+        status = "unread" if args.unread else "read"
+        print(json.dumps({"status": "success", "message": f"Email marked as {status}"}))
 
     elif args.command == "move":
-        result = bridge.move_email(args.id, args.folder)
-        if result:
-            print(
-                json.dumps(
-                    {"status": "success", "message": f"Email moved to {args.folder}"}
-                )
+        bridge.move_email(args.id, args.folder)
+        print(
+            json.dumps(
+                {"status": "success", "message": f"Email moved to {args.folder}"}
             )
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to move email"}))
-            sys.exit(1)
+        )
 
     elif args.command == "delete-email":
-        result = bridge.delete_email(args.id)
-        if result:
-            print(json.dumps({"status": "success", "message": "Email deleted"}))
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to delete email"}))
-            sys.exit(1)
+        bridge.delete_email(args.id)
+        print(json.dumps({"status": "success", "message": "Email deleted"}))
 
     elif args.command == "create-appt":
         entry_id = bridge.create_appointment(
@@ -480,46 +459,28 @@ def main() -> None:
             args.required,
             args.optional,
         )
-        if entry_id:
-            print(
-                json.dumps(
-                    {
-                        "status": "success",
-                        "entry_id": entry_id,
-                        "message": "Appointment created",
-                    }
-                )
+        print(
+            json.dumps(
+                {
+                    "status": "success",
+                    "entry_id": entry_id,
+                    "message": "Appointment created",
+                }
             )
-        else:
-            print(
-                json.dumps(
-                    {"status": "error", "message": "Failed to create appointment"}
-                )
-            )
-            sys.exit(1)
+        )
 
     elif args.command == "appointment":
         appointment = bridge.get_appointment(args.id)
-        if appointment:
-            print(json.dumps(appointment, indent=2))
-        else:
-            print("Appointment not found", file=sys.stderr)
-            sys.exit(1)
+        if appointment is None:
+            fail("Appointment not found")
+        print(json.dumps(appointment, indent=2))
 
     elif args.command == "delete-appt":
-        result = bridge.delete_appointment(args.id)
-        if result:
-            print(json.dumps({"status": "success", "message": "Appointment deleted"}))
-        else:
-            print(
-                json.dumps(
-                    {"status": "error", "message": "Failed to delete appointment"}
-                )
-            )
-            sys.exit(1)
+        bridge.delete_appointment(args.id)
+        print(json.dumps({"status": "success", "message": "Appointment deleted"}))
 
     elif args.command == "edit-appt":
-        result = bridge.edit_appointment(
+        bridge.edit_appointment(
             args.id,
             required_attendees=args.required,
             optional_attendees=args.optional,
@@ -529,29 +490,16 @@ def main() -> None:
             location=args.location,
             body=args.body,
         )
-        if result:
-            print(json.dumps({"status": "success", "message": "Appointment updated"}))
-        else:
-            print(
-                json.dumps({"status": "error", "message": "Failed to edit appointment"})
-            )
-            sys.exit(1)
+        print(json.dumps({"status": "success", "message": "Appointment updated"}))
 
     elif args.command == "respond":
-        result = bridge.respond_to_meeting(args.id, args.response)
-        if result:
-            print(
-                json.dumps(
-                    {"status": "success", "message": f"Meeting {args.response}ed"}
-                )
-            )
-        else:
-            print(
-                json.dumps(
-                    {"status": "error", "message": "Failed to respond to meeting"}
-                )
-            )
-            sys.exit(1)
+        bridge.respond_to_meeting(args.id, args.response)
+        outcome = {
+            "accept": "accepted",
+            "decline": "declined",
+            "tentative": "tentatively accepted",
+        }[args.response]
+        print(json.dumps({"status": "success", "message": f"Meeting {outcome}"}))
 
     elif args.command == "freebusy":
         freebusy = bridge.get_free_busy(
@@ -560,6 +508,8 @@ def main() -> None:
             end_date=getattr(args, "end", None),
             entry_id=getattr(args, "id", None),
         )
+        if not freebusy.get("resolved"):
+            fail(f"Could not resolve email address: {freebusy.get('email')}")
         print(json.dumps(freebusy, indent=2))
 
     elif args.command == "tasks":
@@ -568,30 +518,24 @@ def main() -> None:
 
     elif args.command == "task":
         task = bridge.get_task(args.id)
-        if task:
-            print(json.dumps(task, indent=2))
-        else:
-            print("Task not found", file=sys.stderr)
-            sys.exit(1)
+        if task is None:
+            fail("Task not found")
+        print(json.dumps(task, indent=2))
 
     elif args.command == "create-task":
         entry_id = bridge.create_task(args.subject, args.body, args.due, args.priority)
-        if entry_id:
-            print(
-                json.dumps(
-                    {
-                        "status": "success",
-                        "entry_id": entry_id,
-                        "message": "Task created",
-                    }
-                )
+        print(
+            json.dumps(
+                {
+                    "status": "success",
+                    "entry_id": entry_id,
+                    "message": "Task created",
+                }
             )
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to create task"}))
-            sys.exit(1)
+        )
 
     elif args.command == "edit-task":
-        result = bridge.edit_task(
+        bridge.edit_task(
             args.id,
             args.subject,
             args.body,
@@ -600,29 +544,15 @@ def main() -> None:
             args.percent,
             args.complete,
         )
-        if result:
-            print(json.dumps({"status": "success", "message": "Task updated"}))
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to edit task"}))
-            sys.exit(1)
+        print(json.dumps({"status": "success", "message": "Task updated"}))
 
     elif args.command == "complete-task":
-        result = bridge.complete_task(args.id)
-        if result:
-            print(
-                json.dumps({"status": "success", "message": "Task marked as complete"})
-            )
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to complete task"}))
-            sys.exit(1)
+        bridge.complete_task(args.id)
+        print(json.dumps({"status": "success", "message": "Task marked as complete"}))
 
     elif args.command == "delete-task":
-        result = bridge.delete_task(args.id)
-        if result:
-            print(json.dumps({"status": "success", "message": "Task deleted"}))
-        else:
-            print(json.dumps({"status": "error", "message": "Failed to delete task"}))
-            sys.exit(1)
+        bridge.delete_task(args.id)
+        print(json.dumps({"status": "success", "message": "Task deleted"}))
 
 
 if __name__ == "__main__":

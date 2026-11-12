@@ -16,6 +16,7 @@ import pytest
 
 from mailtool.bridge import (
     FOLDER_SEARCH_MAX_DEPTH,
+    MailtoolError,
     OutlookBridge,
     _find_folder_by_name,
     _folder_by_path,
@@ -98,10 +99,12 @@ class TestFindFolderByName:
     def test_max_visited_bounds_a_wide_search(self):
         # 10 direct children; target is the last one visited. A max_visited
         # of 3 must give up before reaching it, even though max_depth (8)
-        # would otherwise allow the search to continue.
+        # would otherwise allow the search to continue, and say it stopped
+        # rather than report the folder as missing.
         children = [FakeMailFolder(f"Child{i}") for i in range(10)]
         root = FakeMailFolder("Root", children)
-        assert _find_folder_by_name(root, "Child9", 8, max_visited=3) is None
+        with pytest.raises(MailtoolError, match="search stopped"):
+            _find_folder_by_name(root, "Child9", 8, max_visited=3)
         assert _find_folder_by_name(root, "Child9", 8, max_visited=20) is children[9]
 
 
@@ -129,10 +132,25 @@ class TestFolderByPath:
         assert _folder_by_path(inbox, ["Databricks Alerts", "Nope"]) is None
 
 
+class FakeNamespace:
+    """Namespace whose Folders lists the account roots."""
+
+    def __init__(self, roots):
+        self.roots = list(roots)
+        self.Folders = self
+
+    @property
+    def Count(self):  # noqa: N802 - mirrors Outlook COM API
+        return len(self.roots)
+
+    def Item(self, i):  # noqa: N802 - mirrors Outlook COM API
+        return self.roots[i - 1]
+
+
 def make_bridge_with_root(root_folder):
     bridge = OutlookBridge.__new__(OutlookBridge)  # skip COM __init__
     bridge._get_root = lambda: root_folder
-    bridge.namespace = FakeFoldersCollection([])  # .Folders.Count -> error path
+    bridge.namespace = FakeNamespace([])
     return bridge
 
 
@@ -182,32 +200,36 @@ class FakeItems:
         return iter(self._items)
 
 
-class TestFolderNotFoundWarning:
-    def test_list_emails_warns_and_falls_back_to_inbox(self, monkeypatch, capsys):
+class TestFolderNotFoundRaises:
+    """A folder that can't be found is an error, never a silent fallback to
+    Inbox (which would report another folder's mail as the requested one)."""
+
+    @staticmethod
+    def make_bridge(monkeypatch):
         bridge = OutlookBridge.__new__(OutlookBridge)
         monkeypatch.setattr(bridge, "get_folder_by_name", lambda _name: None)
         inbox_folder = type("F", (), {"Items": FakeItems()})()
         bridge.get_inbox = lambda: inbox_folder
+        return bridge
 
-        result = bridge.list_emails(limit=5, folder="Nope")
+    def test_list_emails_raises(self, monkeypatch):
+        bridge = self.make_bridge(monkeypatch)
 
-        assert result == []
-        captured = capsys.readouterr()
-        assert "Nope" in captured.err
-        assert "not found" in captured.err
+        with pytest.raises(MailtoolError, match="Folder not found: Nope"):
+            bridge.list_emails(limit=5, folder="Nope")
 
-    def test_search_by_sender_warns_and_falls_back_to_inbox(self, monkeypatch, capsys):
+    def test_search_by_sender_raises(self, monkeypatch):
+        bridge = self.make_bridge(monkeypatch)
+
+        with pytest.raises(MailtoolError, match="Folder not found: Nope"):
+            bridge.search_by_sender("someone@example.com", folder="Nope")
+
+    def test_missing_inbox_raises(self):
         bridge = OutlookBridge.__new__(OutlookBridge)
-        monkeypatch.setattr(bridge, "get_folder_by_name", lambda _name: None)
-        inbox_folder = type("F", (), {"Items": FakeItems()})()
-        bridge.get_inbox = lambda: inbox_folder
+        bridge.get_inbox = lambda: None
 
-        result = bridge.search_by_sender("someone@example.com", folder="Nope")
-
-        assert result == []
-        captured = capsys.readouterr()
-        assert "Nope" in captured.err
-        assert "not found" in captured.err
+        with pytest.raises(MailtoolError, match="Inbox folder not found"):
+            bridge.list_emails()
 
 
 class FakeCountableItems(FakeItems):
@@ -222,22 +244,14 @@ class FakeCountableItems(FakeItems):
 
 
 class TestGetInboxStatsNotFoundReporting:
-    def test_warns_and_reports_inbox_not_the_requested_name(self, monkeypatch, capsys):
-        # get_inbox_stats previously fell back to Inbox silently AND kept
-        # reporting the *requested* folder name in the result — valid-looking
-        # counts attributed to a folder that was never queried.
+    def test_unknown_folder_raises_instead_of_reporting_inbox_counts(self, monkeypatch):
         bridge = OutlookBridge.__new__(OutlookBridge)
         monkeypatch.setattr(bridge, "get_folder_by_name", lambda _name: None)
         inbox_folder = type("F", (), {"Items": FakeCountableItems(7)})()
         bridge.get_inbox = lambda: inbox_folder
 
-        result = bridge.get_inbox_stats(folder="Nope")
-
-        assert result["folder"] == "Inbox"
-        assert result["total"] == 7
-        captured = capsys.readouterr()
-        assert "Nope" in captured.err
-        assert "not found" in captured.err
+        with pytest.raises(MailtoolError, match="Folder not found: Nope"):
+            bridge.get_inbox_stats(folder="Nope")
 
     def test_resolved_folder_reports_its_own_name(self, monkeypatch):
         bridge = OutlookBridge.__new__(OutlookBridge)
