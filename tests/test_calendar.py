@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from mailtool.bridge import MailtoolError
+
 from .conftest import TEST_PREFIX, assert_calendar_structure, assert_valid_entry_id
 
 
@@ -279,11 +281,18 @@ class TestCalendar:
         assert result["start_date"] == start_date
         assert result["end_date"] == end_date
 
-    def test_free_busy_with_invalid_email(self, bridge):
-        """Test free/busy with an unresolvable email address"""
-        result = bridge.get_free_busy(email_address="nonexistent@example.com")
+    def test_free_busy_unavailable_raises(self, bridge):
+        """A resolvable address with no free/busy data raises MailtoolError.
 
-        assert result is not None
-        assert isinstance(result, dict)
-        # Should have error info or resolved=False
-        assert "resolved" in result or "error" in result
+        Any SMTP address resolves, so an external one gets as far as FreeBusy,
+        which fails with "Cannot load free/busy information".
+        """
+        with pytest.raises(MailtoolError, match="free/busy"):
+            bridge.get_free_busy(email_address="nonexistent@example.com")
+
+    def test_free_busy_unresolvable_name(self, bridge):
+        """A name Outlook can't resolve is a normal answer, not a failure"""
+        result = bridge.get_free_busy(email_address="zz no such person qq")
+
+        assert result["resolved"] is False
+        assert result["error"] == "Could not resolve email address"

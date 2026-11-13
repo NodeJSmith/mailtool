@@ -119,12 +119,16 @@ def cleanup_helpers(bridge):
 
     Returns a dict with cleanup functions:
     - delete_drafts_by_prefix(prefix): Delete all draft emails with subject prefix
+    - delete_inbox_by_prefix(prefix): Delete all Inbox emails with subject prefix
     - delete_calendar_by_prefix(prefix): Delete all calendar items with subject prefix
     - delete_tasks_by_prefix(prefix): Delete all tasks with subject prefix
     """
     return {
         "delete_drafts_by_prefix": lambda prefix: delete_by_subject_prefix(
             bridge.get_folder_by_name("Drafts"), prefix
+        ),
+        "delete_inbox_by_prefix": lambda prefix: delete_by_subject_prefix(
+            bridge.get_inbox(), prefix
         ),
         "delete_calendar_by_prefix": lambda prefix: delete_by_subject_prefix(
             bridge.get_calendar(), prefix

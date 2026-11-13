@@ -176,7 +176,7 @@ def main() -> None:
     search_parser.add_argument(
         "--query",
         required=True,
-        help="SQL filter query (e.g., urn:schemas:httpmail:subject LIKE '%%keyword%%')",
+        help="Jet filter query (e.g., [Subject] LIKE '%%keyword%%')",
     )
     search_parser.add_argument(
         "--limit", type=int, default=100, help="Max results to return"
