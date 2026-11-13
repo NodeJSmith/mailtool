@@ -25,6 +25,12 @@ All notable changes to this project are documented here. The format is based on
   just that occurrence. Acting on a whole series takes `--series` (`series=True`); a series
   id without it is an error. `calendar --all` help now says what it does: the next 365 days.
 
+- **BREAKING: dates and times use `whenever`.** `whenever` is a new dependency.
+  `get_free_busy` takes `start_date`/`end_date` as `"YYYY-MM-DD"` strings or whenever
+  `Date`s, no longer stdlib `datetime`s, and with no `start_date` it queries from midnight
+  today rather than the current time. `--start`/`--end` and due dates must be zero-padded
+  (`2026-01-05 07:00:00`); the old parser also accepted `2026-1-5 7:00:00`.
+
 ### Removed
 
 - **MCP server.** `src/mailtool/mcp/`, the `mailtool-mcp` entry point, the `mailtool mcp`

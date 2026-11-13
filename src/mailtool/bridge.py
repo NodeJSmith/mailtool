@@ -105,13 +105,19 @@ OL_APPT_EXCEPTION = 3
 # occurrence as "<series EntryID>@<start>", with the start as Outlook reports
 # it. EntryIDs are hex, so "@" can't occur in one.
 OCCURRENCE_ID_SEPARATOR = "@"
-OCCURRENCE_START_PATTERN = "YYYYMMDD'T'HHmmss"
 
-# whenever patterns. Appointment times in and out of mailtool are local wall
-# clock, the same time Outlook shows.
+# whenever format patterns. Times in and out of mailtool are local wall clock,
+# the same time Outlook shows.
 WALL_CLOCK_PATTERN = "YYYY-MM-DD HH:mm:ss"
 DATE_PATTERN = "YYYY-MM-DD"
+# The start inside an occurrence id.
+OCCURRENCE_START_PATTERN = "YYYYMMDD'T'HHmmss"
+# Calendar Restrict filters compare to the minute.
 DASL_DATETIME_PATTERN = "YYYY-MM-DD HH:mm"
+
+# The time fields of a COM date value: lowercase on a stdlib datetime (what
+# pywin32 returns), capitalised on older pywintypes Time objects.
+COM_TIME_FIELDS = ("year", "month", "day", "hour", "minute", "second")
 
 # Outlook OlResponseStatus enum.
 RESPONSE_STATUS_LABELS = {
@@ -393,7 +399,7 @@ def _is_not_found_error(error):
     return bool(_com_error_codes(error) & NOT_FOUND_HRESULTS)
 
 
-def occurrence_id(series_id, start: PlainDateTime):
+def occurrence_id(series_id: str, start: PlainDateTime) -> str:
     """The id of the occurrence of series `series_id` that starts at `start`."""
     return (
         f"{series_id}{OCCURRENCE_ID_SEPARATOR}{start.format(OCCURRENCE_START_PATTERN)}"
@@ -411,47 +417,41 @@ def to_outlook(wall: PlainDateTime) -> datetime:
     return wall.assume_utc().to_stdlib()
 
 
+def date_to_outlook(day: Date) -> datetime:
+    """A date for an Outlook COM call, as midnight local wall clock.
+
+    Midnight is safe: to_outlook passes the wall-clock time through unchanged,
+    so the date can't slip across a day boundary.
+    """
+    return to_outlook(day.at(Time(0, 0)))
+
+
 def from_outlook(value) -> PlainDateTime | None:
     """Read an Outlook COM time as local wall clock, or None if unreadable.
 
     Outlook returns local wall-clock time, which pywin32 labels with a UTC
-    tzinfo; the label is dropped. Also accepts objects exposing Year/Month/...
-    properties, as older pywintypes Time values do.
+    tzinfo; reading only the fields drops the label.
     """
     if not value:
         return None
+    if isinstance(value, datetime):
+        names = COM_TIME_FIELDS
+    else:
+        names = tuple(name.capitalize() for name in COM_TIME_FIELDS)
     try:
-        if isinstance(value, datetime):
-            parts = (
-                value.year,
-                value.month,
-                value.day,
-                value.hour,
-                value.minute,
-                value.second,
-            )
-        else:
-            parts = (
-                value.Year,
-                value.Month,
-                value.Day,
-                value.Hour,
-                value.Minute,
-                value.Second,
-            )
-        return PlainDateTime(*parts)
-    except Exception:
+        return PlainDateTime(*(getattr(value, name) for name in names))
+    except (AttributeError, TypeError, ValueError):
         return None
 
 
 def format_outlook_time(value):
-    """An Outlook COM time as "YYYY-MM-DD HH:MM:SS" local wall clock, or None."""
+    """Output string for an Outlook COM time: "YYYY-MM-DD HH:MM:SS", or None."""
     wall = from_outlook(value)
     return wall.format(WALL_CLOCK_PATTERN) if wall else None
 
 
 def format_outlook_date(value):
-    """The date part of an Outlook COM time as "YYYY-MM-DD", or None."""
+    """Output string for the date of an Outlook COM time: "YYYY-MM-DD", or None."""
     wall = from_outlook(value)
     return wall.date().format(DATE_PATTERN) if wall else None
 
@@ -462,7 +462,10 @@ def parse_wall_clock(text) -> PlainDateTime:
 
 
 def parse_date(value) -> Date:
-    """A whenever Date, or a "YYYY-MM-DD" string parsed into one."""
+    """A "YYYY-MM-DD" string parsed into a Date (raises ValueError).
+
+    A Date passes through, for library callers of get_free_busy.
+    """
     if isinstance(value, Date):
         return value
     return Date.parse(value, pattern=DATE_PATTERN)
@@ -1403,19 +1406,16 @@ class OutlookBridge:
                 start = self._safe_get_attr(item, "Start")
                 end = self._safe_get_attr(item, "End")
 
-                # Skip if no start time
-                if not start:
-                    continue
-
                 # Python-level overlap re-check (defence in depth; the COM
                 # filter above should already have scoped correctly).
-                start_n = from_outlook(start)
-                end_n = from_outlook(end)
-                if start_n is None:
+                start_wall = from_outlook(start)
+                end_wall = from_outlook(end)
+                if start_wall is None:
+                    _warn_skipped("a calendar item with no readable start", start)
                     continue
-                if start_n > end_dt:
+                if start_wall > end_dt:
                     continue
-                if end_n is not None and end_n < start_dt:
+                if end_wall is not None and end_wall < start_dt:
                     continue
 
                 # Get attendees (safe access)
@@ -1432,8 +1432,8 @@ class OutlookBridge:
                     "entry_id": entry_id,
                     "series_id": series_id,
                     "subject": self._safe_get_attr(item, "Subject", "(No Subject)"),
-                    "start": start_n.format(WALL_CLOCK_PATTERN),
-                    "end": end_n.format(WALL_CLOCK_PATTERN) if end_n else None,
+                    "start": start_wall.format(WALL_CLOCK_PATTERN),
+                    "end": end_wall.format(WALL_CLOCK_PATTERN) if end_wall else None,
                     "location": self._safe_get_attr(item, "Location", ""),
                     "organizer": self._safe_get_attr(item, "Organizer"),
                     "all_day": self._safe_get_attr(item, "AllDayEvent", False),
@@ -2003,7 +2003,7 @@ class OutlookBridge:
             task.Subject = subject
             task.Body = body
             if due_date:
-                task.DueDate = to_outlook(parse_date(due_date).at(Time()))
+                task.DueDate = date_to_outlook(parse_date(due_date))
             task.Importance = importance
             task.Save()
             return task.EntryID
@@ -2077,7 +2077,7 @@ class OutlookBridge:
             if body is not None:
                 item.Body = body
             if due_date:
-                item.DueDate = to_outlook(parse_date(due_date).at(Time()))
+                item.DueDate = date_to_outlook(parse_date(due_date))
             if importance is not None:
                 item.Importance = importance
             if percent_complete is not None:
@@ -2351,7 +2351,9 @@ class OutlookBridge:
                 email_address = self.namespace.CurrentUser.Address
 
             # Default to today if no dates provided
-            start_date = parse_date(start_date) if start_date else Date.today(SYSTEM_TZ)
+            start_date = (
+                parse_date(start_date) if start_date else now_wall_clock().date()
+            )
             end_date = parse_date(end_date) if end_date else start_date.add(days=1)
 
             # Create recipient and get free/busy
@@ -2360,7 +2362,7 @@ class OutlookBridge:
                 # FreeBusy returns a string with time slots and status
                 # 0=Free, 1=Tentative, 2=Busy, 3=Out of Office, 4=Working Elsewhere
                 freebusy = recipient.FreeBusy(
-                    to_outlook(start_date.at(Time())), 60 * 24
+                    date_to_outlook(start_date), 60 * 24
                 )  # 1440 minutes = 1 day
                 return {
                     "email": email_address,

@@ -35,7 +35,12 @@ LIVE_OUTLOOK_AVAILABLE = (
 
 
 def shifted(wall, **delta):
-    """`wall` moved by `delta`. DST shifts don't matter for test scheduling."""
+    """`wall` moved by `delta`.
+
+    whenever refuses to shift a PlainDateTime by hours or minutes unless told
+    to, because across a DST change the result isn't that many real hours
+    later. Tests only need wall-clock offsets, so that's fine here.
+    """
     return wall.add(**delta, naive_arithmetic_ok=True)
 
 

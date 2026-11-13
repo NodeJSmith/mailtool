@@ -28,6 +28,8 @@ from mailtool.bridge import (
     translate_filter,
 )
 
+from .conftest import shifted
+
 pytestmark = pytest.mark.unit
 
 MEETING_STATUS_CASES = [
@@ -201,11 +203,6 @@ class FakeFolder:
 class FakeCalendar:
     def __init__(self, items):
         self.Items = items
-
-
-def shifted(wall, **delta):
-    """`wall` moved by `delta`; DST is irrelevant to these fake calendars."""
-    return wall.add(**delta, naive_arithmetic_ok=True)
 
 
 def make_appointment(start, end, subject="Test Appointment"):
@@ -385,6 +382,20 @@ class TestSearchEmailsFilterHandling:
         assert "Overlap" in subjects
         assert "Past" not in subjects
         assert "Far Future" not in subjects
+
+    def test_unreadable_start_is_skipped_with_a_warning(self, capsys):
+        now = now_wall_clock()
+        good = make_appointment(shifted(now, hours=1), shifted(now, hours=2), "Good")
+        broken = make_appointment(
+            shifted(now, hours=1), shifted(now, hours=2), "Broken"
+        )
+        broken.Start = "garbage"
+        bridge, _ = make_bridge_with_calendar(FakeItems([good, broken]))
+
+        events = bridge.list_calendar_events(days=1)
+
+        assert [e["subject"] for e in events] == ["Good"]
+        assert "no readable start" in capsys.readouterr().err
 
     def test_iteration_cap_respected(self, monkeypatch):
         now = now_wall_clock()

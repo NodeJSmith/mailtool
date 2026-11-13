@@ -41,8 +41,9 @@ upstream, so nothing here publishes.
 - **Occurrence ids.** Outlook gives every occurrence of a recurring meeting the series'
   EntryID, so an EntryID alone can only address the series. Listings return
   `<EntryID>@<start>` for an occurrence (`occurrence_id`), resolved with
-  `GetRecurrencePattern().GetOccurrence(start)`. Mutators refuse a series id unless `series=True`, so one occurrence is the
-  easy target and the whole series is the deliberate one. Moving an occurrence changes its id.
+  `GetRecurrencePattern().GetOccurrence(start)`. Mutators refuse a series id unless
+  `series=True`, so one occurrence is the easy target and the whole series is the deliberate
+  one. Moving an occurrence changes its id.
 - **Times are local wall clock, in whenever.** Outlook reads and returns appointment times
   and due dates as local wall-clock time, so mailtool holds them as whenever `PlainDateTime`
   and `Date` (stdlib `datetime` appears only at the COM boundary). Every value crosses that
