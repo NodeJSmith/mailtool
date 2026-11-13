@@ -149,6 +149,8 @@ class TestLookup:
 
         appt = bridge.get_appointment(occurrence_id(SERIES_ID, TUE))
 
+        assert appt is not None
+
         assert appt["subject"] == "moved"
         assert appt["entry_id"] == occurrence_id(SERIES_ID, TUE)
         assert appt["series_id"] == SERIES_ID
@@ -166,6 +168,8 @@ class TestLookup:
         bridge, _ = series_bridge()
 
         appt = bridge.get_appointment(SERIES_ID)
+
+        assert appt is not None
 
         assert appt["entry_id"] == SERIES_ID
         assert appt["series_id"] == SERIES_ID
