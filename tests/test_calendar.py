@@ -416,3 +416,47 @@ class TestRecurringOccurrences:
 
         subjects = [e["subject"] for e in listed(bridge, f"{subject} renamed")]
         assert len(subjects) == OCCURRENCES
+
+
+@pytest.mark.integration
+@pytest.mark.calendar
+class TestWallClockTimes:
+    """A time given to mailtool is the time Outlook shows: local wall clock."""
+
+    START = "07:00:00"
+    END = "07:30:00"
+
+    def tomorrow_at(self, wall_time):
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        return f"{tomorrow} {wall_time}"
+
+    def test_create_keeps_the_requested_time(
+        self, bridge, test_timestamp, cleanup_helpers
+    ):
+        start, end = self.tomorrow_at(self.START), self.tomorrow_at(self.END)
+
+        entry_id = bridge.create_appointment(
+            subject=f"{TEST_PREFIX}Wall clock {test_timestamp}", start=start, end=end
+        )
+
+        appt = bridge.get_appointment(entry_id)
+        cleanup_helpers["delete_calendar_by_prefix"](TEST_PREFIX)
+        assert appt is not None
+        assert (appt["start"], appt["end"]) == (start, end)
+
+    def test_edit_keeps_the_requested_time(
+        self, bridge, test_timestamp, cleanup_helpers
+    ):
+        entry_id = bridge.create_appointment(
+            subject=f"{TEST_PREFIX}Wall clock edit {test_timestamp}",
+            start=self.tomorrow_at("10:00:00"),
+            end=self.tomorrow_at("10:30:00"),
+        )
+        start, end = self.tomorrow_at(self.START), self.tomorrow_at(self.END)
+
+        bridge.edit_appointment(entry_id, start=start, end=end)
+
+        appt = bridge.get_appointment(entry_id)
+        cleanup_helpers["delete_calendar_by_prefix"](TEST_PREFIX)
+        assert appt is not None
+        assert (appt["start"], appt["end"]) == (start, end)
