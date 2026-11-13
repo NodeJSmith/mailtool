@@ -1057,6 +1057,21 @@ class TestAttachmentReadFailures:
 
 
 class TestFreeBusyCli:
+    def test_interval_reaches_the_bridge(self, run_cli):
+        calls = []
+
+        def get_free_busy(**kwargs):
+            calls.append(kwargs)
+            return {"email": "a@example.com", "resolved": True, "busy": []}
+
+        code, _, _ = run_cli(
+            ["freebusy", "--email", "a@example.com", "--interval", "15"],
+            get_free_busy=get_free_busy,
+        )
+
+        assert code == 0
+        assert calls[0]["interval_minutes"] == 15
+
     def test_unresolvable_address_exits_1(self, run_cli):
         code, out, _ = run_cli(
             ["freebusy", "--email", "typo@example.com"],

@@ -13,7 +13,11 @@ import sys
 import traceback
 from typing import NoReturn
 
-from mailtool.bridge import MailtoolError, OutlookBridge
+from mailtool.bridge import (
+    DEFAULT_FREE_BUSY_INTERVAL_MINUTES,
+    MailtoolError,
+    OutlookBridge,
+)
 
 
 def _check_platform() -> None:
@@ -266,7 +270,9 @@ def main() -> None:
     )
 
     # Free/busy command
-    freebusy_parser = subparsers.add_parser("freebusy", help="Get free/busy status")
+    freebusy_parser = subparsers.add_parser(
+        "freebusy", help="List busy blocks for a person over a date range"
+    )
     freebusy_parser.add_argument(
         "--email", help="Email address to check (defaults to current user)"
     )
@@ -274,7 +280,16 @@ def main() -> None:
         "--start", help="Start date (YYYY-MM-DD, defaults to today)"
     )
     freebusy_parser.add_argument(
-        "--end", help="End date (YYYY-MM-DD, defaults to tomorrow)"
+        "--end",
+        help="Last day to check, inclusive (YYYY-MM-DD, defaults to --start). "
+        "Outlook only covers a fixed span from --start (29 days on Exchange)",
+    )
+    freebusy_parser.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_FREE_BUSY_INTERVAL_MINUTES,
+        help="Slot size in minutes; must divide a day evenly, e.g. 15, 30, 60 "
+        "(default: %(default)s)",
     )
     freebusy_parser.add_argument(
         "--id", help="DEPRECATED: Appointment entry ID (use --email instead)"
@@ -533,6 +548,9 @@ def run_command(bridge: OutlookBridge, args: argparse.Namespace) -> None:
             start_date=getattr(args, "start", None),
             end_date=getattr(args, "end", None),
             entry_id=getattr(args, "id", None),
+            interval_minutes=getattr(
+                args, "interval", DEFAULT_FREE_BUSY_INTERVAL_MINUTES
+            ),
         )
         if not freebusy.get("resolved"):
             fail(f"Could not resolve email address: {freebusy.get('email')}")

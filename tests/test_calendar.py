@@ -4,6 +4,8 @@ Calendar functionality tests.
 Tests for listing, creating, and managing calendar appointments.
 """
 
+import time
+
 import pytest
 from whenever import Time
 
@@ -24,8 +26,21 @@ from .conftest import (
     shifted,
 )
 
+# How long Exchange may take to publish a new meeting to free/busy.
+FREE_BUSY_PUBLISH_WAIT_SECONDS = 120
+POLL_SECONDS = 5
 # Meetings in the daily_series fixture.
 OCCURRENCES = 4
+
+
+def wait_until(condition, timeout_seconds):
+    """Poll `condition` until it's true or the timeout passes; its last result."""
+    deadline = time.monotonic() + timeout_seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(POLL_SECONDS)
+    return True
 
 
 @pytest.mark.integration
@@ -269,27 +284,52 @@ class TestCalendar:
         assert appt is None
 
     def test_get_free_busy_current_user(self, bridge):
-        """Test getting free/busy information for current user"""
-        # Get free/busy for today (defaults to current user if no email provided)
+        """Defaults: the current user, today, 30-minute slots."""
         result = bridge.get_free_busy()
 
-        assert result is not None
-        assert isinstance(result, dict)
-        assert "email" in result
-        assert "start_date" in result
-        assert "end_date" in result
+        assert result["resolved"] is True
+        assert result["interval_minutes"] == 30
+        assert isinstance(result["busy"], list)
 
-    def test_get_free_busy_with_dates(self, bridge):
-        """Test getting free/busy with specific date range"""
-        start_date = "2025-01-01"
-        end_date = "2025-01-02"
+    @pytest.mark.slow
+    @pytest.mark.timeout(FREE_BUSY_PUBLISH_WAIT_SECONDS * 2)
+    def test_new_appointment_shows_as_a_busy_block(
+        self, bridge, test_timestamp, cleanup_helpers
+    ):
+        """A meeting created at 07:00-07:30 tomorrow is busy at exactly that time.
 
-        result = bridge.get_free_busy(start_date=start_date, end_date=end_date)
+        Free/busy comes from what Exchange has published, which lags a new
+        meeting by tens of seconds, so the test polls. Assumes nothing else is
+        on the calendar right next to 07:00-07:30 tomorrow, which would merge
+        into a larger block.
+        """
+        day = now_wall_clock().date().add(days=1)
+        start = day.at(Time(7)).format(WALL_CLOCK_PATTERN)
+        end = day.at(Time(7, 30)).format(WALL_CLOCK_PATTERN)
+        bridge.create_appointment(
+            subject=f"{TEST_PREFIX}Free/busy {test_timestamp}", start=start, end=end
+        )
 
-        assert result is not None
-        assert isinstance(result, dict)
-        assert result["start_date"] == start_date
-        assert result["end_date"] == end_date
+        expected = {"start": start, "end": end, "status": "Busy"}
+        try:
+            published = wait_until(
+                lambda: expected
+                in bridge.get_free_busy(start_date=day.format(DATE_PATTERN))["busy"],
+                FREE_BUSY_PUBLISH_WAIT_SECONDS,
+            )
+        finally:
+            cleanup_helpers["delete_calendar_by_prefix"](TEST_PREFIX)
+
+        assert published
+
+    def test_window_past_outlooks_span_raises(self, bridge):
+        today = now_wall_clock().date()
+
+        with pytest.raises(MailtoolError, match="days from the start date"):
+            bridge.get_free_busy(
+                start_date=today.format(DATE_PATTERN),
+                end_date=today.add(days=60).format(DATE_PATTERN),
+            )
 
     def test_free_busy_unavailable_raises(self, bridge):
         """A resolvable address with no free/busy data raises MailtoolError.

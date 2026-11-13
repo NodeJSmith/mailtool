@@ -53,7 +53,11 @@ upstream, so nothing here publishes.
   UTC offset.
 - **Filters.** `Items.Restrict` speaks Jet, which has no LIKE. Filters containing LIKE are
   translated to DASL (`@SQL=`) through a verified field map in `bridge.py`.
-- **Free/busy** takes an email address directly and defaults to the current user.
+- **Free/busy** takes an email address directly and defaults to the current user. It returns
+  busy blocks (free time is the gaps) from `start_date` through `end_date` inclusive, in
+  `interval_minutes` slots. Outlook's `FreeBusy` always answers for a fixed span from
+  midnight of the start date (29 days on Exchange) and ignores the time of day, so the end
+  is applied by trimming its answer; a range past the span raises.
 - **Return values.** Failures raise `MailtoolError` (a `RuntimeError`), never an empty
   result or a `False` sentinel, because the consumers are unattended digests that read an
   empty list as "nothing new". Lists return `[]` only when nothing matches; a fetch by an
