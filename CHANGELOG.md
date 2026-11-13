@@ -31,6 +31,14 @@ All notable changes to this project are documented here. The format is based on
   today rather than the current time. `--start`/`--end` and due dates must be zero-padded
   (`2026-01-05 07:00:00`); the old parser also accepted `2026-1-5 7:00:00`.
 
+- **BREAKING: `freebusy` returns busy blocks.** The raw `free_busy` digit string is replaced
+  by `busy`, a list of `{start, end, status}` blocks in local wall clock (free time is the
+  gaps), plus `interval_minutes`. It used to ask Outlook for one character per day, ignore
+  `end_date`, and get only free/busy (0/1); it now asks for full detail (tentative, busy,
+  out of office, working elsewhere) in 30-minute slots (`--interval` to change) from
+  `start_date` through `end_date`, now inclusive and defaulting to `start_date`. An
+  `end_date` past what Outlook returns (29 days on Exchange) is an error.
+
 ### Removed
 
 - **MCP server.** `src/mailtool/mcp/`, the `mailtool-mcp` entry point, the `mailtool mcp`

@@ -59,6 +59,7 @@ integration tests in parallel.
 - **`test_bridge.py`**: Core connectivity and basic operations
 - **`test_emails.py`**: Email listing, creation, search, operations
 - **`test_calendar.py`**: Calendar events, appointments, free/busy
+- **`test_free_busy.py`**: Free/busy busy blocks and date window (fake COM, no Outlook)
 - **`test_tasks.py`**: Task management, completion, status updates
 
 ## Test Markers

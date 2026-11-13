@@ -119,6 +119,18 @@ DASL_DATETIME_PATTERN = "YYYY-MM-DD HH:mm"
 # pywin32 returns), capitalised on older pywintypes Time objects.
 COM_TIME_FIELDS = ("year", "month", "day", "hour", "minute", "second")
 
+# Recipient.FreeBusy with complete_format=True: one digit per slot. The keys
+# are characters of that string, not ints.
+FREE_BUSY_STATUS_LABELS = {
+    "1": "Tentative",
+    "2": "Busy",
+    "3": "Out of Office",
+    "4": "Working Elsewhere",
+}
+FREE_SLOT = "0"
+DEFAULT_FREE_BUSY_INTERVAL_MINUTES = 30
+MINUTES_PER_DAY = 24 * 60
+
 # Outlook OlResponseStatus enum.
 RESPONSE_STATUS_LABELS = {
     0: "None",
@@ -474,6 +486,44 @@ def parse_date(value) -> Date:
 def now_wall_clock() -> PlainDateTime:
     """The current local wall-clock time, to compare with Outlook's times."""
     return ZonedDateTime.now(SYSTEM_TZ).to_plain()
+
+
+def free_busy_blocks(
+    slots: str, start: PlainDateTime, interval_minutes: int
+) -> list[dict]:
+    """Merge Outlook's free/busy digits into {start, end, status} blocks.
+
+    `slots` has one digit per `interval_minutes` from `start`; free slots are
+    left out, so free time is the gaps between blocks.
+    """
+
+    def slot_time(index):
+        # Slot N is N intervals of wall-clock time after start: Outlook gives
+        # every day the same number of slots, DST days included, so a slot's
+        # time is plain wall-clock arithmetic rather than elapsed time.
+        return start.add(
+            minutes=index * interval_minutes, naive_arithmetic_ok=True
+        ).format(WALL_CLOCK_PATTERN)
+
+    blocks = []
+    # Slots run_start..index-1 all have run_status; a run ends when the digit
+    # changes. The appended free slot ends a run that reaches the window's end.
+    run_start, run_status = 0, FREE_SLOT
+    for index, digit in enumerate(slots + FREE_SLOT):
+        if digit == run_status:
+            continue
+        if run_status != FREE_SLOT:
+            blocks.append(
+                {
+                    "start": slot_time(run_start),
+                    "end": slot_time(index),
+                    "status": FREE_BUSY_STATUS_LABELS.get(
+                        run_status, f"Unknown ({run_status})"
+                    ),
+                }
+            )
+        run_start, run_status = index, digit
+    return blocks
 
 
 def split_appointment_id(entry_id):
@@ -2316,25 +2366,42 @@ class OutlookBridge:
             }
 
     def get_free_busy(
-        self, email_address=None, start_date=None, end_date=None, entry_id=None
+        self,
+        email_address=None,
+        start_date=None,
+        end_date=None,
+        entry_id=None,
+        interval_minutes=DEFAULT_FREE_BUSY_INTERVAL_MINUTES,
     ):
         """
-        Get free/busy status for an email address
+        Get the busy blocks for an email address from start_date through end_date
 
         Args:
             email_address: Email address to check (optional, defaults to current user)
-            start_date: Start date ("YYYY-MM-DD" or whenever Date; defaults to today)
-            end_date: End date ("YYYY-MM-DD" or whenever Date; defaults to start + 1 day)
+            start_date: First day ("YYYY-MM-DD" or whenever Date; defaults to today)
+            end_date: Last day, inclusive ("YYYY-MM-DD" or whenever Date; defaults
+                to start_date). Outlook only returns free/busy for a fixed span
+                from the start date (29 days on Exchange); a longer range raises
+                with the actual span.
             entry_id: DEPRECATED - Appointment entry ID (legacy, use email_address instead)
+            interval_minutes: Slot size; must divide a day evenly
 
         Returns:
-            Dictionary with free/busy information. An address Outlook can't
+            Dictionary whose "busy" list holds {start, end, status} blocks in
+            local wall clock; free time is the gaps. An address Outlook can't
             resolve is a normal answer, not a failure: the dict has
             resolved=False and an "error" description.
 
         Raises:
-            MailtoolError: If the COM calls fail or a date can't be parsed.
+            MailtoolError: If the COM calls fail, a date can't be parsed, the
+                window is empty or longer than Outlook returns, or the
+                interval doesn't divide a day.
         """
+        if interval_minutes <= 0 or MINUTES_PER_DAY % interval_minutes:
+            raise MailtoolError(
+                "Free/busy interval must divide a day evenly (e.g. 15, 30, 60), "
+                f"got {interval_minutes}"
+            )
         with _com_operation("get free/busy"):
             # Handle legacy entry_id parameter (extract first required attendee)
             if entry_id and not email_address:
@@ -2345,6 +2412,8 @@ class OutlookBridge:
                     attendees = item.RequiredAttendees.split(";")
                     if attendees:
                         email_address = attendees[0].strip()
+                if not email_address:
+                    raise MailtoolError(f"Item {entry_id} has no required attendees")
 
             # Default to current user if no email provided
             if not email_address:
@@ -2354,21 +2423,39 @@ class OutlookBridge:
             start_date = (
                 parse_date(start_date) if start_date else now_wall_clock().date()
             )
-            end_date = parse_date(end_date) if end_date else start_date.add(days=1)
+            end_date = parse_date(end_date) if end_date else start_date
+            if end_date < start_date:
+                raise MailtoolError("Free/busy end_date can't be before start_date")
+            days_requested = int(start_date.until(end_date, total="days")) + 1
 
             # Create recipient and get free/busy
             recipient = self.namespace.CreateRecipient(email_address)
             if recipient.Resolve():
-                # FreeBusy returns a string with time slots and status
-                # 0=Free, 1=Tentative, 2=Busy, 3=Out of Office, 4=Working Elsewhere
-                freebusy = recipient.FreeBusy(
-                    date_to_outlook(start_date), 60 * 24
-                )  # 1440 minutes = 1 day
+                # One digit per slot from midnight of start_date, for a span
+                # Outlook picks; complete_format=True distinguishes busy,
+                # tentative, out of office and working elsewhere.
+                slots = recipient.FreeBusy(
+                    date_to_outlook(start_date), interval_minutes, True
+                )
+                if not slots:
+                    raise MailtoolError(
+                        f"Outlook returned no free/busy data for {email_address}"
+                    )
+                slots_per_day = MINUTES_PER_DAY // interval_minutes
+                wanted = days_requested * slots_per_day
+                if len(slots) < wanted:
+                    raise MailtoolError(
+                        f"Outlook returns free/busy for {len(slots) // slots_per_day} "
+                        "days from the start date; ask for an end_date within that"
+                    )
                 return {
                     "email": email_address,
                     "start_date": start_date.format(DATE_PATTERN),
                     "end_date": end_date.format(DATE_PATTERN),
-                    "free_busy": freebusy,
+                    "interval_minutes": interval_minutes,
+                    "busy": free_busy_blocks(
+                        slots[:wanted], start_date.at(Time(0, 0)), interval_minutes
+                    ),
                     "resolved": True,
                 }
             else:
