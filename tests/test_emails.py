@@ -184,51 +184,42 @@ class TestEmails:
             to="test@example.com", subject=subject, body="Test body", save_draft=True
         )
 
-        # Try to move to Inbox (most likely to exist)
-        bridge.move_email(entry_id, "Inbox")
-        # Note: This may fail if item is already in Inbox
-        # We're mainly testing the API doesn't crash
+        try:
+            # Inbox is the one folder every mailbox has
+            assert bridge.move_email(entry_id, "Inbox") is True
+        finally:
+            # The moved draft lands in the Inbox, so clean up both folders. Left
+            # behind, a sender-less draft at the top of the Inbox breaks the
+            # sender-search tests below.
+            cleanup_helpers["delete_drafts_by_prefix"](TEST_PREFIX)
+            cleanup_helpers["delete_inbox_by_prefix"](TEST_PREFIX)
 
-        # Cleanup
-        cleanup_helpers["delete_drafts_by_prefix"](TEST_PREFIX)
+    @pytest.fixture
+    def inbox_sender(self, bridge):
+        """Sender address of the newest Inbox email that has one.
 
-    def test_search_by_sender(self, bridge):
+        Drafts and some system items have no sender, and searching for an empty
+        sender matches nothing, so it would walk the whole Inbox.
+        """
+        for email in bridge.list_emails(limit=20):
+            if email["sender"]:
+                return email["sender"]
+        pytest.skip("No Inbox email with a sender to search for")
+
+    def test_search_by_sender(self, bridge, inbox_sender):
         """Test searching emails by sender (handles Exchange addresses)"""
-        # Get some emails from inbox to find a sender
-        emails = bridge.list_emails(limit=5)
+        # limit=1: search_by_sender scans newest-first until it has `limit`
+        # matches, so a sender with fewer matches would make it walk the whole
+        # Inbox. The email the sender came from is near the top.
+        results = bridge.search_by_sender(inbox_sender, limit=1)
 
-        if not emails:
-            pytest.skip("No emails in inbox to test sender search")
+        assert len(results) == 1
+        assert_email_structure(results[0])
+        assert results[0]["sender"].lower() == inbox_sender.lower()
 
-        # Get sender from first email
-        sender_email = emails[0]["sender"]
-
-        # Search by sender email
-        results = bridge.search_by_sender(sender_email, limit=10)
-
-        assert isinstance(results, list)
-        # Should find at least the email we got the sender from
-        assert len(results) >= 1
-
-        # Verify all results have the correct sender
-        for email in results:
-            assert_email_structure(email)
-            # Sender should match (case-insensitive)
-            assert email["sender"].lower() == sender_email.lower()
-
-    def test_search_by_sender_case_insensitive(self, bridge):
+    def test_search_by_sender_case_insensitive(self, bridge, inbox_sender):
         """Test that search_by_sender is case-insensitive"""
-        # Get some emails from inbox to find a sender
-        emails = bridge.list_emails(limit=5)
+        results = bridge.search_by_sender(inbox_sender.upper(), limit=1)
 
-        if not emails:
-            pytest.skip("No emails in inbox to test case-insensitive search")
-
-        sender_email = emails[0]["sender"]
-
-        # Search with different case
-        results = bridge.search_by_sender(sender_email.upper(), limit=10)
-
-        assert isinstance(results, list)
-        # Should still find emails
-        assert len(results) >= 1
+        assert len(results) == 1
+        assert results[0]["sender"].lower() == inbox_sender.lower()
