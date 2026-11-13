@@ -11,11 +11,15 @@ import importlib.util
 import sys
 import time
 import uuid
-from datetime import datetime, timedelta
 
 import pytest
 
-from mailtool.bridge import OutlookBridge
+from mailtool.bridge import (
+    DATE_PATTERN,
+    WALL_CLOCK_PATTERN,
+    OutlookBridge,
+    now_wall_clock,
+)
 
 # Prefix for all test-created items (enables easy identification and cleanup)
 TEST_PREFIX = "[TEST] "
@@ -28,6 +32,21 @@ WARMUP_DELAY = 0.5
 LIVE_OUTLOOK_AVAILABLE = (
     sys.platform == "win32" and importlib.util.find_spec("win32com") is not None
 )
+
+
+def shifted(wall, **delta):
+    """`wall` moved by `delta`.
+
+    whenever refuses to shift a PlainDateTime by hours or minutes unless told
+    to, because across a DST change the result isn't that many real hours
+    later. Tests only need wall-clock offsets, so that's fine here.
+    """
+    return wall.add(**delta, naive_arithmetic_ok=True)
+
+
+def from_now(**delta):
+    """The local wall-clock time `delta` from now."""
+    return shifted(now_wall_clock(), **delta)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -176,13 +195,13 @@ def sample_calendar_data(bridge, cleanup_helpers):
     test_unique = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
     subject = f"{TEST_PREFIX}Sample Event {test_unique}"
 
-    start = datetime.now() + timedelta(hours=1)
-    end = start + timedelta(minutes=30)
+    start = from_now(hours=1)
+    end = shifted(start, minutes=30)
 
     entry_id = bridge.create_appointment(
         subject=subject,
-        start=start.strftime("%Y-%m-%d %H:%M:%S"),
-        end=end.strftime("%Y-%m-%d %H:%M:%S"),
+        start=start.format(WALL_CLOCK_PATTERN),
+        end=end.format(WALL_CLOCK_PATTERN),
         location="Test Location",
         body="Test event body",
     )
@@ -202,7 +221,7 @@ def sample_task_data(bridge, cleanup_helpers):
     test_unique = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
     subject = f"{TEST_PREFIX}Sample Task {test_unique}"
 
-    due_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+    due_date = from_now(days=7).date().format(DATE_PATTERN)
 
     entry_id = bridge.create_task(
         subject=subject, body="Test task body", due_date=due_date

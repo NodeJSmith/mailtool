@@ -6,11 +6,10 @@ metadata). They do NOT require Outlook or pywin32 to be running; the bridge modu
 constants can be tested on any platform.
 """
 
-from datetime import datetime
-
 import pytest
+from whenever import PlainDateTime
 
-from mailtool.bridge import _SMTP_REGEX, MAIL_ONLY_FILTER, OutlookBridge
+from mailtool.bridge import _SMTP_REGEX, MAIL_ONLY_FILTER, OutlookBridge, to_outlook
 
 
 @pytest.mark.unit
@@ -131,8 +130,8 @@ class _FakeMailItem:
     CC = "carol@example.com"
     BCC = ""
     Unread = True
-    ReceivedTime = datetime(2026, 7, 7, 10, 0, 0)
-    SentOn = datetime(2026, 7, 7, 9, 55, 0)
+    ReceivedTime = to_outlook(PlainDateTime(2026, 7, 7, 10, 0, 0))
+    SentOn = to_outlook(PlainDateTime(2026, 7, 7, 9, 55, 0))
     ConversationID = "conv-1"
     ConversationTopic = "Hello"
     Body = "Body text\n\n-----Original Message-----\nFrom: old@x.com"

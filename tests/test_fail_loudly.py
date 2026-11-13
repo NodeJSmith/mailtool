@@ -10,9 +10,10 @@ import json
 import sys
 
 import pytest
+from whenever import PlainDateTime
 
 from mailtool import cli
-from mailtool.bridge import MailtoolError, OutlookBridge, _com_operation
+from mailtool.bridge import MailtoolError, OutlookBridge, _com_operation, to_outlook
 
 pytestmark = pytest.mark.unit
 
@@ -497,6 +498,31 @@ class TestFreeBusy:
         result = bridge.get_free_busy(email_address="a@example.com")
 
         assert result["resolved"] is False
+
+    def test_start_date_reaches_outlook_as_local_midnight(self):
+        """The date goes through to_outlook, so it can't slip a day."""
+        bridge = make_bridge()
+        asked = []
+
+        class Recipient:
+            def Resolve(self):  # noqa: N802 - mirrors Outlook COM API
+                return True
+
+            def FreeBusy(self, start, minutes_per_char):  # noqa: N802 - mirrors Outlook COM API
+                asked.append(start)
+                return "0"
+
+        bridge.namespace.CreateRecipient = lambda _addr: Recipient()
+
+        result = bridge.get_free_busy(
+            email_address="a@example.com", start_date="2026-01-05"
+        )
+
+        assert asked == [to_outlook(PlainDateTime(2026, 1, 5, 0, 0))]
+        assert (result["start_date"], result["end_date"]) == (
+            "2026-01-05",
+            "2026-01-06",
+        )
 
 
 class FakeCliBridge:

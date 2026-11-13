@@ -25,6 +25,12 @@ All notable changes to this project are documented here. The format is based on
   just that occurrence. Acting on a whole series takes `--series` (`series=True`); a series
   id without it is an error. `calendar --all` help now says what it does: the next 365 days.
 
+- **BREAKING: dates and times use `whenever`.** `whenever` is a new dependency.
+  `get_free_busy` takes `start_date`/`end_date` as `"YYYY-MM-DD"` strings or whenever
+  `Date`s, no longer stdlib `datetime`s, and with no `start_date` it queries from midnight
+  today rather than the current time. `--start`/`--end` and due dates must be zero-padded
+  (`2026-01-05 07:00:00`); the old parser also accepted `2026-1-5 7:00:00`.
+
 ### Removed
 
 - **MCP server.** `src/mailtool/mcp/`, the `mailtool-mcp` entry point, the `mailtool mcp`
@@ -34,6 +40,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Appointment times are saved as given.** `create-appt` and `edit-appt` saved times off by
+  the UTC offset: `--start "2026-11-14 07:00:00"` on a Central-time machine made a 1 PM
+  appointment, because pywin32 converts a naive datetime from local time before Outlook
+  reads it as local time. All dates and times now go through one conversion at the COM
+  boundary, which also covers task due dates and the free/busy start date. Dates and times
+  are handled with `whenever` internally (a new dependency).
 - A malformed entry ID (a string that isn't an Outlook EntryID at all) returns `None` like
   any other unknown ID. Outlook reports it as `E_INVALIDARG`, which `get_item_by_id` was
   raising as `MailtoolError`.

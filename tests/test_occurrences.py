@@ -7,9 +7,8 @@ Outlook gives every occurrence the series' EntryID, so mailtool identifies an
 occurrence as "<series EntryID>@<start>". Pure-Python (fake COM objects).
 """
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
+from whenever import PlainDateTime, Time
 
 from mailtool.bridge import (
     OL_APPOINTMENT,
@@ -18,8 +17,10 @@ from mailtool.bridge import (
     OL_APPT_NOT_RECURRING,
     OL_APPT_OCCURRENCE,
     MailtoolError,
+    now_wall_clock,
     occurrence_id,
     split_appointment_id,
+    to_outlook,
 )
 
 from .test_fail_loudly import FakeComError, FakeFolder, ListItems, make_bridge
@@ -27,11 +28,12 @@ from .test_fail_loudly import FakeComError, FakeFolder, ListItems, make_bridge
 pytestmark = pytest.mark.unit
 
 SERIES_ID = "00000000ABCDEF"
-# Tomorrow and the day after at 09:00, inside the listing's 7-day window.
-MON = (datetime.now() + timedelta(days=1)).replace(
-    hour=9, minute=0, second=0, microsecond=0, tzinfo=UTC
-)
-TUE = MON + timedelta(days=1)
+# Tomorrow and the day after at 09:00 local wall clock, inside the listing's
+# 7-day window. The *_COM values are what pywin32 hands back for those times.
+MON = now_wall_clock().date().add(days=1).at(Time(9))
+TUE = MON.add(days=1)
+MON_COM = to_outlook(MON)
+TUE_COM = to_outlook(TUE)
 
 
 class FakeMissingOccurrenceError(FakeComError):
@@ -91,9 +93,9 @@ class FakePattern:
 
 class FakeSeries(FakeAppointment):
     def __init__(self):
-        super().__init__(MON, state=OL_APPT_MASTER)
-        self.mon = FakeAppointment(MON, state=OL_APPT_OCCURRENCE)
-        self.tue = FakeAppointment(TUE, state=OL_APPT_EXCEPTION, subject="moved")
+        super().__init__(MON_COM, state=OL_APPT_MASTER)
+        self.mon = FakeAppointment(MON_COM, state=OL_APPT_OCCURRENCE)
+        self.tue = FakeAppointment(TUE_COM, state=OL_APPT_EXCEPTION, subject="moved")
         self.pattern = FakePattern([self.mon, self.tue])
 
     def GetRecurrencePattern(self):  # noqa: N802 - mirrors Outlook COM API
@@ -107,7 +109,7 @@ def series_bridge():
 
 class TestOccurrenceIdFormat:
     def test_round_trip(self):
-        start = datetime(2026, 11, 16, 9, 0)
+        start = PlainDateTime(2026, 11, 16, 9, 0)
         oid = occurrence_id(SERIES_ID, start)
 
         assert oid == f"{SERIES_ID}@20261116T090000"
@@ -124,7 +126,9 @@ class TestOccurrenceIdFormat:
 class TestListing:
     def test_occurrences_get_their_own_ids_and_share_a_series_id(self):
         series = FakeSeries()
-        single = FakeAppointment(MON, state=OL_APPT_NOT_RECURRING, subject="one-off")
+        single = FakeAppointment(
+            MON_COM, state=OL_APPT_NOT_RECURRING, subject="one-off"
+        )
         single.EntryID = "single-id"
         bridge = make_bridge()
 
@@ -162,7 +166,7 @@ class TestLookup:
 
         bridge.get_appointment(occurrence_id(SERIES_ID, MON))
 
-        assert series.pattern.asked == [MON]
+        assert series.pattern.asked == [MON_COM]
 
     def test_get_appointment_by_series_id_reads_the_series(self):
         bridge, _ = series_bridge()
@@ -177,12 +181,12 @@ class TestLookup:
     def test_missing_occurrence_is_none(self):
         bridge, _ = series_bridge()
 
-        later = MON + timedelta(days=5)
+        later = MON.add(days=5)
 
         assert bridge.get_appointment(occurrence_id(SERIES_ID, later)) is None
 
     def test_occurrence_id_on_a_non_recurring_item_is_none(self):
-        single = FakeAppointment(MON, state=OL_APPT_NOT_RECURRING)
+        single = FakeAppointment(MON_COM, state=OL_APPT_NOT_RECURRING)
         bridge = make_bridge(items={SERIES_ID: single})
 
         assert bridge.get_appointment(occurrence_id(SERIES_ID, MON)) is None
@@ -233,7 +237,7 @@ class TestMutatorsTargetOneOccurrence:
         assert series.tue.calls == []
 
     def test_non_recurring_appointment_needs_no_flag(self):
-        single = FakeAppointment(MON, state=OL_APPT_NOT_RECURRING)
+        single = FakeAppointment(MON_COM, state=OL_APPT_NOT_RECURRING)
         bridge = make_bridge(items={SERIES_ID: single})
 
         assert bridge.delete_appointment(SERIES_ID) is True
