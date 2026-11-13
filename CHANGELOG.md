@@ -48,6 +48,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`freebusy` with no `--email` reports your SMTP address.** It used to report
+  `CurrentUser.Address`, which on Exchange is an internal `/o=ExchangeLabs/...` DN.
 - **Appointment times are saved as given.** `create-appt` and `edit-appt` saved times off by
   the UTC offset: `--start "2026-11-14 07:00:00"` on a Central-time machine made a 1 PM
   appointment, because pywin32 converts a naive datetime from local time before Outlook

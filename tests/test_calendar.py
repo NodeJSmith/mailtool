@@ -288,6 +288,8 @@ class TestCalendar:
         result = bridge.get_free_busy()
 
         assert result["resolved"] is True
+        assert "@" in result["email"]
+        assert not result["email"].startswith("/o=")
         assert result["interval_minutes"] == 30
         assert isinstance(result["busy"], list)
 

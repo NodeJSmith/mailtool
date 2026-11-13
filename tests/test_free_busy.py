@@ -20,6 +20,8 @@ pytestmark = pytest.mark.unit
 
 SLOT_MINUTES = 30
 SLOTS_PER_DAY = 24 * 60 // SLOT_MINUTES
+EXCHANGE_DN = "/o=ExchangeLabs/ou=Exchange Administrative Group/cn=Recipients/cn=me"
+MY_SMTP = "me@example.com"
 
 
 def day_of(*busy):
@@ -37,6 +39,11 @@ class RecordingRecipient:
     def __init__(self, slots):
         self.slots = slots
         self.asked = []
+        self.address = None
+
+    def created_for(self, address):
+        self.address = address
+        return self
 
     def Resolve(self):  # noqa: N802 - mirrors Outlook COM API
         return True
@@ -50,10 +57,45 @@ class AttendeelessMeeting(FakeItem):
     RequiredAttendees = ""
 
 
-def free_busy_bridge(slots, items=None):
+class FakeExchangeUser:
+    PrimarySmtpAddress = MY_SMTP
+
+
+class FakePropertyAccessor:
+    def GetProperty(self, _tag):  # noqa: N802 - mirrors Outlook COM API
+        return MY_SMTP
+
+
+class FakeAddressEntry:
+    """An Exchange address entry; cached=True mimics cached Exchange mode,
+    where GetExchangeUser() returns None."""
+
+    Type = "EX"
+
+    def __init__(self, cached=False):
+        self.cached = cached
+        self.PropertyAccessor = FakePropertyAccessor()
+
+    def GetExchangeUser(self):  # noqa: N802 - mirrors Outlook COM API
+        return None if self.cached else FakeExchangeUser()
+
+
+class SmtpAddressEntry:
+    Type = "SMTP"
+
+
+class FakeCurrentUser:
+    Address = EXCHANGE_DN
+
+    def __init__(self, cached=False):
+        self.AddressEntry = FakeAddressEntry(cached)
+
+
+def free_busy_bridge(slots, items=None, cached=False):
     bridge = make_bridge(items=items)
     recipient = RecordingRecipient(slots)
-    bridge.namespace.CreateRecipient = lambda _addr: recipient
+    bridge.namespace.CreateRecipient = lambda addr: recipient.created_for(addr)
+    bridge.namespace.CurrentUser = FakeCurrentUser(cached)
     return bridge, recipient
 
 
@@ -214,3 +256,23 @@ class TestGetFreeBusy:
             bridge.get_free_busy(entry_id="id-1")
 
         assert recipient.asked == []
+
+
+class TestDefaultAddress:
+    @pytest.mark.parametrize("cached", [False, True], ids=["online", "cached"])
+    def test_current_user_is_their_smtp_address(self, cached):
+        """Not the Exchange DN that CurrentUser.Address holds."""
+        bridge, recipient = free_busy_bridge(day_of(), cached=cached)
+
+        result = bridge.get_free_busy()
+
+        assert result["email"] == MY_SMTP
+        assert recipient.address == MY_SMTP
+
+    def test_non_exchange_user_keeps_their_address(self):
+        """An IMAP/POP profile's address is already SMTP."""
+        bridge, _ = free_busy_bridge(day_of())
+        bridge.namespace.CurrentUser.Address = MY_SMTP
+        bridge.namespace.CurrentUser.AddressEntry = SmtpAddressEntry()
+
+        assert bridge.get_free_busy()["email"] == MY_SMTP
