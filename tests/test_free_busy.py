@@ -70,12 +70,18 @@ class FakeAddressEntry:
     """An Exchange address entry; cached=True mimics cached Exchange mode,
     where GetExchangeUser() returns None."""
 
+    Type = "EX"
+
     def __init__(self, cached=False):
         self.cached = cached
         self.PropertyAccessor = FakePropertyAccessor()
 
     def GetExchangeUser(self):  # noqa: N802 - mirrors Outlook COM API
         return None if self.cached else FakeExchangeUser()
+
+
+class SmtpAddressEntry:
+    Type = "SMTP"
 
 
 class FakeCurrentUser:
@@ -262,3 +268,11 @@ class TestDefaultAddress:
 
         assert result["email"] == MY_SMTP
         assert recipient.address == MY_SMTP
+
+    def test_non_exchange_user_keeps_their_address(self):
+        """An IMAP/POP profile's address is already SMTP."""
+        bridge, _ = free_busy_bridge(day_of())
+        bridge.namespace.CurrentUser.Address = MY_SMTP
+        bridge.namespace.CurrentUser.AddressEntry = SmtpAddressEntry()
+
+        assert bridge.get_free_busy()["email"] == MY_SMTP

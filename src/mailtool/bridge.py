@@ -53,6 +53,10 @@ COM_ATTR_ERRORS: tuple[type[BaseException], ...] = (
 # when both GetExchangeUser() and the PropertyAccessor lookup fail.
 _SMTP_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
+# PR_SMTP_ADDRESS on an AddressEntry: the SMTP address when GetExchangeUser()
+# returns None, as it can in cached Exchange mode.
+PR_SMTP_ADDRESS = "http://schemas.microsoft.com/mapi/proptag/0x39FE001F"
+
 # Outlook OlMeetingStatus enum. There is no 2, and an invite received from
 # someone else is 3, not "cancelled": cancellations are 5 and 7.
 MEETING_STATUS_LABELS = {
@@ -2365,6 +2369,18 @@ class OutlookBridge:
                 "unread": int(unread),
             }
 
+    def current_user_smtp_address(self):
+        """The signed-in user's SMTP address. CurrentUser.Address is an
+        Exchange DN (/o=ExchangeLabs/...) on Exchange accounts."""
+        user = self.namespace.CurrentUser
+        entry = user.AddressEntry
+        if entry.Type != "EX":
+            return user.Address
+        exchange_user = entry.GetExchangeUser()
+        if exchange_user is not None:
+            return exchange_user.PrimarySmtpAddress
+        return entry.PropertyAccessor.GetProperty(PR_SMTP_ADDRESS) or user.Address
+
     def get_free_busy(
         self,
         email_address=None,
@@ -2415,9 +2431,8 @@ class OutlookBridge:
                 if not email_address:
                     raise MailtoolError(f"Item {entry_id} has no required attendees")
 
-            # Default to current user if no email provided
             if not email_address:
-                email_address = self.namespace.CurrentUser.Address
+                email_address = self.current_user_smtp_address()
 
             # Default to today if no dates provided
             start_date = (
