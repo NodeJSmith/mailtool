@@ -7,12 +7,16 @@ Outlook gives every occurrence the series' EntryID, so mailtool identifies an
 occurrence as "<series EntryID>@<start>". Pure-Python (fake COM objects).
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from mailtool.bridge import (
     OL_APPOINTMENT,
+    OL_APPT_EXCEPTION,
+    OL_APPT_MASTER,
+    OL_APPT_NOT_RECURRING,
+    OL_APPT_OCCURRENCE,
     MailtoolError,
     occurrence_id,
     split_appointment_id,
@@ -23,8 +27,11 @@ from .test_fail_loudly import FakeComError, FakeFolder, ListItems, make_bridge
 pytestmark = pytest.mark.unit
 
 SERIES_ID = "00000000ABCDEF"
-MON = datetime(2026, 11, 16, 9, 0, tzinfo=UTC)
-TUE = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+# Tomorrow and the day after at 09:00, inside the listing's 7-day window.
+MON = (datetime.now() + timedelta(days=1)).replace(
+    hour=9, minute=0, second=0, microsecond=0, tzinfo=UTC
+)
+TUE = MON + timedelta(days=1)
 
 
 class FakeMissingOccurrenceError(FakeComError):
@@ -47,14 +54,13 @@ class FakeAppointment:
     MeetingStatus = 0
     ResponseRequested = False
 
-    def __init__(self, start, state, parent=None, subject="standup"):
+    def __init__(self, start, state, subject="standup"):
         self.EntryID = SERIES_ID
         self.Start = start
         self.End = start
         self.Subject = subject
         self.RecurrenceState = state
-        self.IsRecurring = state != 0
-        self.Parent = parent
+        self.IsRecurring = state != OL_APPT_NOT_RECURRING
         self.calls = []
 
     def Save(self):  # noqa: N802 - mirrors Outlook COM API
@@ -85,9 +91,9 @@ class FakePattern:
 
 class FakeSeries(FakeAppointment):
     def __init__(self):
-        super().__init__(MON, state=1)
-        self.mon = FakeAppointment(MON, state=2, parent=self)
-        self.tue = FakeAppointment(TUE, state=3, parent=self, subject="moved")
+        super().__init__(MON, state=OL_APPT_MASTER)
+        self.mon = FakeAppointment(MON, state=OL_APPT_OCCURRENCE)
+        self.tue = FakeAppointment(TUE, state=OL_APPT_EXCEPTION, subject="moved")
         self.pattern = FakePattern([self.mon, self.tue])
 
     def GetRecurrencePattern(self):  # noqa: N802 - mirrors Outlook COM API
@@ -101,10 +107,11 @@ def series_bridge():
 
 class TestOccurrenceIdFormat:
     def test_round_trip(self):
-        oid = occurrence_id(SERIES_ID, MON)
+        start = datetime(2026, 11, 16, 9, 0)
+        oid = occurrence_id(SERIES_ID, start)
 
         assert oid == f"{SERIES_ID}@20261116T090000"
-        assert split_appointment_id(oid) == (SERIES_ID, datetime(2026, 11, 16, 9, 0))
+        assert split_appointment_id(oid) == (SERIES_ID, start)
 
     def test_plain_entry_id_has_no_start(self):
         assert split_appointment_id(SERIES_ID) == (SERIES_ID, None)
@@ -117,7 +124,7 @@ class TestOccurrenceIdFormat:
 class TestListing:
     def test_occurrences_get_their_own_ids_and_share_a_series_id(self):
         series = FakeSeries()
-        single = FakeAppointment(MON, state=0, subject="one-off")
+        single = FakeAppointment(MON, state=OL_APPT_NOT_RECURRING, subject="one-off")
         single.EntryID = "single-id"
         bridge = make_bridge()
 
@@ -136,18 +143,6 @@ class TestListing:
         assert by_subject["one-off"]["series_id"] is None
 
 
-@pytest.fixture(autouse=True)
-def window_covers_fakes(monkeypatch):
-    """Pin "now" so the listing's overlap re-check keeps the fake dates."""
-
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(2026, 11, 15, 0, 0)
-
-    monkeypatch.setattr("mailtool.bridge.datetime", FixedDatetime)
-
-
 class TestLookup:
     def test_get_appointment_by_occurrence_id_reads_that_occurrence(self):
         bridge, _ = series_bridge()
@@ -159,8 +154,8 @@ class TestLookup:
         assert appt["series_id"] == SERIES_ID
 
     def test_occurrence_is_looked_up_by_wall_clock_start_labelled_utc(self):
-        """pywin32 converts a naive datetime from local time; labelling the
-        wall-clock start as UTC passes it to Outlook unchanged."""
+        """Pins only the argument shape. That pywin32 then hands Outlook the
+        right wall-clock time is proven by the live tests in test_calendar."""
         bridge, series = series_bridge()
 
         bridge.get_appointment(occurrence_id(SERIES_ID, MON))
@@ -178,10 +173,12 @@ class TestLookup:
     def test_missing_occurrence_is_none(self):
         bridge, _ = series_bridge()
 
-        assert bridge.get_appointment(f"{SERIES_ID}@20261118T090000") is None
+        later = MON + timedelta(days=5)
+
+        assert bridge.get_appointment(occurrence_id(SERIES_ID, later)) is None
 
     def test_occurrence_id_on_a_non_recurring_item_is_none(self):
-        single = FakeAppointment(MON, state=0)
+        single = FakeAppointment(MON, state=OL_APPT_NOT_RECURRING)
         bridge = make_bridge(items={SERIES_ID: single})
 
         assert bridge.get_appointment(occurrence_id(SERIES_ID, MON)) is None
@@ -232,7 +229,7 @@ class TestMutatorsTargetOneOccurrence:
         assert series.tue.calls == []
 
     def test_non_recurring_appointment_needs_no_flag(self):
-        single = FakeAppointment(MON, state=0)
+        single = FakeAppointment(MON, state=OL_APPT_NOT_RECURRING)
         bridge = make_bridge(items={SERIES_ID: single})
 
         assert bridge.delete_appointment(SERIES_ID) is True

@@ -18,6 +18,12 @@ All notable changes to this project are documented here. The format is based on
   for Outlook's not-found errors and raises on any other lookup failure; folder lookups
   raise when the lookup itself fails instead of reporting "not found". An unknown `--folder` now fails instead
   of silently falling back to the Inbox, and a failed attachment add aborts the send.
+- **BREAKING: one occurrence of a recurring meeting is addressable on its own.** Outlook
+  gives every occurrence the series' EntryID, so `entry_id` from `calendar` used to target
+  the whole series. Occurrences now list as `<series EntryID>@<start>` with a new
+  `series_id` field, and `appointment`, `edit-appt`, `delete-appt` and `respond` act on
+  just that occurrence. Acting on a whole series takes `--series` (`series=True`); a series
+  id without it is an error. `calendar --all` help now says what it does: the next 365 days.
 
 ### Removed
 
