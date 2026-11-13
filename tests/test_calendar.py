@@ -12,6 +12,9 @@ from mailtool.bridge import MailtoolError
 
 from .conftest import TEST_PREFIX, assert_calendar_structure, assert_valid_entry_id
 
+# Meetings in the daily_series fixture.
+OCCURRENCES = 4
+
 
 @pytest.mark.integration
 @pytest.mark.calendar
@@ -33,20 +36,16 @@ class TestCalendar:
             # Verify event is within date range
             # (allowing some margin for recurrence)
 
-    @pytest.mark.slow
-    def test_list_calendar_events_all(self, bridge):
-        """Test listing all calendar events without date filtering
+    def test_month_window_includes_the_week(self, bridge):
+        """A 30-day listing contains every event the 7-day listing does.
 
-        Note: This test is marked as slow because it iterates over ALL calendar items,
-        which can include corrupted items that cause COM errors. In production,
-        use date-filtered queries (days parameter) instead of all_events=True.
+        30 days rather than all_events: the 365-day window takes ~40s on a busy
+        calendar, and its bound is covered by the unit tests in test_filters.
         """
-        events = bridge.list_calendar_events(all_events=True)
-        assert isinstance(events, list)
+        month = {e["entry_id"] for e in bridge.list_calendar_events(days=30)}
+        week = {e["entry_id"] for e in bridge.list_calendar_events(days=7)}
 
-        # Should return more events than the filtered version
-        events_filtered = bridge.list_calendar_events(days=7)
-        assert len(events) >= len(events_filtered)
+        assert week <= month
 
     def test_create_appointment_basic(self, bridge, test_timestamp, cleanup_helpers):
         """Test creating a basic appointment"""
@@ -296,3 +295,124 @@ class TestCalendar:
 
         assert result["resolved"] is False
         assert result["error"] == "Could not resolve email address"
+
+
+@pytest.fixture
+def daily_series(bridge, test_timestamp):
+    """A [TEST] daily series of four 15-minute meetings starting tomorrow 06:00.
+
+    Built over COM because create_appointment has no recurrence option.
+    Yields (series_id, subject); deletes the whole series afterwards.
+    """
+    subject = f"{TEST_PREFIX}Series {test_timestamp}"
+    start = (datetime.now() + timedelta(days=1)).replace(
+        hour=6, minute=0, second=0, microsecond=0
+    )
+    appt = bridge.get_calendar().Items.Add()
+    appt.Subject = subject
+    appt.Start = start
+    appt.End = start + timedelta(minutes=15)
+    pattern = appt.GetRecurrencePattern()
+    pattern.RecurrenceType = 0  # olRecurDaily
+    pattern.Occurrences = OCCURRENCES
+    appt.Save()
+    series_id = appt.EntryID
+    yield series_id, subject
+    item = bridge.get_item_by_id(series_id)
+    if item is not None:
+        item.Delete()
+
+
+def listed(bridge, subject_prefix):
+    """This week's listed events whose subject starts with `subject_prefix`."""
+    return [
+        e
+        for e in bridge.list_calendar_events(days=7)
+        if e["subject"].startswith(subject_prefix)
+    ]
+
+
+@pytest.mark.integration
+@pytest.mark.calendar
+class TestRecurringOccurrences:
+    """One occurrence of a recurring meeting is addressable on its own."""
+
+    def test_each_occurrence_has_its_own_id(self, bridge, daily_series):
+        series_id, subject = daily_series
+
+        events = listed(bridge, subject)
+
+        assert len(events) == OCCURRENCES
+        assert len({e["entry_id"] for e in events}) == OCCURRENCES
+        assert {e["series_id"] for e in events} == {series_id}
+
+    def test_get_occurrence(self, bridge, daily_series):
+        _, subject = daily_series
+        second = listed(bridge, subject)[1]
+
+        appt = bridge.get_appointment(second["entry_id"])
+
+        assert appt["entry_id"] == second["entry_id"]
+        assert appt["start"] == second["start"]
+
+    def test_edit_changes_only_that_occurrence(self, bridge, daily_series):
+        _, subject = daily_series
+        second = listed(bridge, subject)[1]
+
+        bridge.edit_appointment(second["entry_id"], subject=f"{subject} edited")
+
+        subjects = [e["subject"] for e in listed(bridge, subject)]
+        assert subjects.count(f"{subject} edited") == 1
+        assert subjects.count(subject) == OCCURRENCES - 1
+
+    def test_moved_occurrence_is_found_by_its_new_id(self, bridge, daily_series):
+        _, subject = daily_series
+        second = listed(bridge, subject)[1]
+        moved_start = datetime.strptime(
+            second["start"], "%Y-%m-%d %H:%M:%S"
+        ) + timedelta(hours=2)
+
+        bridge.edit_appointment(
+            second["entry_id"],
+            start=moved_start.strftime("%Y-%m-%d %H:%M:%S"),
+            end=(moved_start + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+        new_ids = {e["entry_id"] for e in listed(bridge, subject)}
+        assert second["entry_id"] not in new_ids
+        for entry_id in new_ids:
+            assert bridge.get_appointment(entry_id) is not None
+
+    def test_delete_removes_only_that_occurrence(self, bridge, daily_series):
+        _, subject = daily_series
+        second = listed(bridge, subject)[1]
+
+        bridge.delete_appointment(second["entry_id"])
+
+        remaining = listed(bridge, subject)
+        assert len(remaining) == OCCURRENCES - 1
+        assert second["entry_id"] not in {e["entry_id"] for e in remaining}
+        assert bridge.get_appointment(second["entry_id"]) is None
+
+    def test_series_id_needs_the_series_flag(self, bridge, daily_series):
+        series_id, subject = daily_series
+
+        with pytest.raises(MailtoolError, match="recurring series"):
+            bridge.delete_appointment(series_id)
+        assert len(listed(bridge, subject)) == OCCURRENCES
+
+        bridge.delete_appointment(series_id, series=True)
+        assert listed(bridge, subject) == []
+
+    def test_series_flag_on_an_occurrence_id_changes_the_series(
+        self, bridge, daily_series
+    ):
+        _, subject = daily_series
+        second = listed(bridge, subject)[1]
+
+        bridge.edit_appointment(
+            second["entry_id"], subject=f"{subject} renamed", series=True
+        )
+
+        subjects = [e["subject"] for e in listed(bridge, f"{subject} renamed")]
+        assert len(subjects) == OCCURRENCES

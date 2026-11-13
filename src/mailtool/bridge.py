@@ -22,7 +22,7 @@ import os
 import re
 import sys
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 try:
@@ -85,6 +85,25 @@ OL_TASK = 48
 # - E_INVALIDARG (0x80070057): what a live Outlook raises for a string that isn't
 #   a well-formed EntryID at all, such as "invalid_id_12345".
 NOT_FOUND_HRESULTS = frozenset({-2147221233, -2147221241, -2147024809})
+
+# What RecurrencePattern.GetOccurrence raises when no occurrence starts at the
+# requested time (a deleted occurrence, or a time the series never had): E_FAIL
+# inside DISP_E_EXCEPTION. Only checked around GetOccurrence, after the series
+# itself was found, because E_FAIL elsewhere is a real failure.
+GET_OCCURRENCE_MISSING_HRESULT = -2147467259
+
+# Outlook OlRecurrenceState values.
+OL_APPT_NOT_RECURRING = 0
+OL_APPT_MASTER = 1
+OL_APPT_OCCURRENCE = 2
+OL_APPT_EXCEPTION = 3
+
+# Every occurrence of a recurring meeting carries the series' EntryID, so an
+# EntryID alone can only address the whole series. mailtool addresses one
+# occurrence as "<series EntryID>@<start>", with the start as Outlook reports
+# it. EntryIDs are hex, so "@" can't occur in one.
+OCCURRENCE_ID_SEPARATOR = "@"
+OCCURRENCE_START_FORMAT = "%Y%m%dT%H%M%S"
 
 # Outlook OlResponseStatus enum.
 RESPONSE_STATUS_LABELS = {
@@ -348,18 +367,54 @@ def _find_folder_by_name(
     return None
 
 
-def _is_not_found_error(error):
-    """True if a COM error says no item has the requested EntryID.
+def _com_error_codes(error):
+    """The error's own hresult plus the real Outlook code, when there is one.
 
     pywin32 reports Outlook's errors as DISP_E_EXCEPTION (-2147352567) with the
-    real code in excepinfo[5], so both that and the error's own hresult are
-    checked.
+    real code in excepinfo[5].
     """
     codes = {getattr(error, "hresult", None)}
     excepinfo = getattr(error, "excepinfo", None)
     if excepinfo is not None and len(excepinfo) > 5:
         codes.add(excepinfo[5])
-    return bool(codes & NOT_FOUND_HRESULTS)
+    return codes
+
+
+def _is_not_found_error(error):
+    """True if a COM error says no item has the requested EntryID."""
+    return bool(_com_error_codes(error) & NOT_FOUND_HRESULTS)
+
+
+def occurrence_id(series_id, start):
+    """The id of the occurrence of series `series_id` that starts at `start`."""
+    return (
+        f"{series_id}{OCCURRENCE_ID_SEPARATOR}{start.strftime(OCCURRENCE_START_FORMAT)}"
+    )
+
+
+def as_outlook_wall_clock(dt):
+    """Prepare a naive local wall-clock datetime for an Outlook COM call.
+
+    pywin32 converts a naive datetime from local time to UTC, while Outlook
+    reads the value as local wall-clock time. Labelling it UTC passes it
+    through unchanged (verified against live Outlook).
+    """
+    return dt.replace(tzinfo=UTC)
+
+
+def split_appointment_id(entry_id):
+    """Split an appointment id into (EntryID, occurrence start or None).
+
+    A plain EntryID has no start. A suffix that doesn't parse as a start leaves
+    the whole string as the EntryID, so it fails the lookup like any bad id.
+    """
+    series_id, sep, start = entry_id.partition(OCCURRENCE_ID_SEPARATOR)
+    if not sep:
+        return entry_id, None
+    try:
+        return series_id, datetime.strptime(start, OCCURRENCE_START_FORMAT)
+    except ValueError:
+        return entry_id, None
 
 
 class MailtoolError(RuntimeError):
@@ -583,6 +638,74 @@ class OutlookBridge:
         if item is None:
             raise MailtoolError(f"{kind} not found: {entry_id}")
         return item
+
+    def get_appointment_item(self, entry_id):
+        """Resolve an appointment id to its AppointmentItem, or None if missing.
+
+        `entry_id` is a plain EntryID (a single appointment, or a whole
+        recurring series) or an occurrence id from list_calendar_events, which
+        resolves to just that occurrence.
+        """
+        item_id, start = split_appointment_id(entry_id)
+        item = self.get_item_of_class(item_id, OL_APPOINTMENT)
+        if item is None or start is None:
+            return item
+        with _com_operation(f"look up occurrence {entry_id}"):
+            # GetRecurrencePattern on a single appointment would start turning
+            # it into a series, so check first.
+            if not item.IsRecurring:
+                return None
+            pattern = item.GetRecurrencePattern()
+            try:
+                return pattern.GetOccurrence(as_outlook_wall_clock(start))
+            except Exception as e:
+                if GET_OCCURRENCE_MISSING_HRESULT in _com_error_codes(e):
+                    return None
+                raise
+
+    def require_appointment(self, entry_id, kind, series):
+        """Resolve `entry_id` for a mutator: the item to change, or raise.
+
+        A recurring series is changed only when `series` is True, so a series
+        id can't change every occurrence by accident. With `series`, an
+        occurrence id also resolves to its whole series.
+        """
+        item = self.get_appointment_item(entry_id)
+        if item is None:
+            raise MailtoolError(f"{kind} not found: {entry_id}")
+        with _com_operation(f"read the recurrence of {entry_id}"):
+            state = item.RecurrenceState
+        if state == OL_APPT_MASTER and not series:
+            raise MailtoolError(
+                f"{entry_id} is a recurring series, so this would change every "
+                "occurrence. Use one occurrence's entry_id from `mailtool calendar`, "
+                "or pass --series to change the whole series."
+            )
+        if series and state in (OL_APPT_OCCURRENCE, OL_APPT_EXCEPTION):
+            # An occurrence id's EntryID part is the series' own EntryID.
+            series_id, _ = split_appointment_id(entry_id)
+            return self._require_item(series_id, kind, OL_APPOINTMENT)
+        return item
+
+    def appointment_ids(self, item):
+        """(entry_id, series_id) for an appointment.
+
+        entry_id addresses exactly this item: an occurrence id for one
+        occurrence of a series. series_id is the series' EntryID for anything
+        recurring, None otherwise.
+        """
+        entry_id = item.EntryID
+        state = item.RecurrenceState
+        if state in (OL_APPT_OCCURRENCE, OL_APPT_EXCEPTION):
+            start = self._to_naive_datetime(item.Start)
+            if start is None:
+                raise MailtoolError(
+                    f"Can't read the start of an occurrence of {entry_id}"
+                )
+            return occurrence_id(entry_id, start), entry_id
+        if state == OL_APPT_MASTER:
+            return entry_id, entry_id
+        return entry_id, None
 
     def get_inbox(self):
         """Get the inbox folder.
@@ -1285,9 +1408,11 @@ class OutlookBridge:
                 response_status = self._safe_get_attr(item, "ResponseStatus")
 
                 meeting_status = self._safe_get_attr(item, "MeetingStatus")
+                entry_id, series_id = self.appointment_ids(item)
 
                 event = {
-                    "entry_id": self._safe_get_attr(item, "EntryID", ""),
+                    "entry_id": entry_id,
+                    "series_id": series_id,
                     "subject": self._safe_get_attr(item, "Subject", "(No Subject)"),
                     "start": start.strftime("%Y-%m-%d %H:%M:%S") if start else None,
                     "end": end.strftime("%Y-%m-%d %H:%M:%S") if end else None,
@@ -1611,12 +1736,16 @@ class OutlookBridge:
         end=None,
         location=None,
         body=None,
+        series=False,
     ):
         """
         Edit an existing appointment
 
+        Moving an occurrence changes its entry_id, since the id holds its start.
+
         Args:
-            entry_id: Appointment entry ID
+            entry_id: Appointment entry ID, or an occurrence id from
+                list_calendar_events to edit just that occurrence
             required_attendees: Comma-separated list of required attendees
             optional_attendees: Comma-separated list of optional attendees
             subject: New subject (optional)
@@ -1624,14 +1753,16 @@ class OutlookBridge:
             end: New end time (optional)
             location: New location (optional)
             body: New body (optional)
+            series: Required to edit a whole recurring series
 
         Returns:
             True. Failure raises instead of returning False.
 
         Raises:
-            MailtoolError: If the appointment doesn't exist or can't be saved.
+            MailtoolError: If the appointment doesn't exist, is a series and
+                `series` is False, or can't be saved.
         """
-        item = self._require_item(entry_id, "Appointment", OL_APPOINTMENT)
+        item = self.require_appointment(entry_id, "Appointment", series)
         with _com_operation("edit appointment"):
             if required_attendees:
                 item.RequiredAttendees = required_attendees
@@ -1655,7 +1786,8 @@ class OutlookBridge:
         Get full appointment details by entry ID (O(1) direct access)
 
         Args:
-            entry_id: Appointment entry ID
+            entry_id: Appointment entry ID, or an occurrence id from
+                list_calendar_events
 
         Returns:
             Appointment dictionary with full details, or None if not found
@@ -1663,9 +1795,10 @@ class OutlookBridge:
         Raises:
             MailtoolError: If the appointment exists but can't be read.
         """
-        item = self.get_item_of_class(entry_id, OL_APPOINTMENT)
+        item = self.get_appointment_item(entry_id)
         if item:
             with _com_operation("read appointment"):
+                item_entry_id, series_id = self.appointment_ids(item)
                 required_attendees = (
                     item.RequiredAttendees if hasattr(item, "RequiredAttendees") else ""
                 )
@@ -1676,7 +1809,8 @@ class OutlookBridge:
                 meeting_status = self._safe_get_attr(item, "MeetingStatus")
 
                 return {
-                    "entry_id": item.EntryID,
+                    "entry_id": item_entry_id,
+                    "series_id": series_id,
                     "subject": item.Subject
                     if hasattr(item, "Subject")
                     else "(No Subject)",
@@ -1706,13 +1840,15 @@ class OutlookBridge:
                 }
         return None
 
-    def respond_to_meeting(self, entry_id, response):
+    def respond_to_meeting(self, entry_id, response, series=False):
         """
         Respond to a meeting invitation (O(1) direct access)
 
         Args:
-            entry_id: Appointment entry ID
+            entry_id: Appointment entry ID, or an occurrence id from
+                list_calendar_events to respond to just that occurrence
             response: Response - "accept", "decline", "tentative"
+            series: Required to respond to a whole recurring series
 
         Returns:
             True. Failure raises instead of returning False.
@@ -1731,26 +1867,29 @@ class OutlookBridge:
                 f"Unknown meeting response '{response}' "
                 f"(expected one of: {', '.join(response_map)})"
             )
-        item = self._require_item(entry_id, "Meeting", OL_APPOINTMENT)
+        item = self.require_appointment(entry_id, "Meeting", series)
         with _com_operation("respond to meeting"):
             item.Response(response_map[response.lower()])
             item.Send()
             return True
 
-    def delete_appointment(self, entry_id):
+    def delete_appointment(self, entry_id, series=False):
         """
         Delete an appointment (O(1) direct access)
 
         Args:
-            entry_id: Appointment entry ID
+            entry_id: Appointment entry ID, or an occurrence id from
+                list_calendar_events to delete just that occurrence
+            series: Required to delete a whole recurring series
 
         Returns:
             True. Failure raises instead of returning False.
 
         Raises:
-            MailtoolError: If the appointment doesn't exist or can't be deleted.
+            MailtoolError: If the appointment doesn't exist, is a series and
+                `series` is False, or can't be deleted.
         """
-        item = self._require_item(entry_id, "Appointment", OL_APPOINTMENT)
+        item = self.require_appointment(entry_id, "Appointment", series)
         with _com_operation("delete appointment"):
             item.Delete()
             return True

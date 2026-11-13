@@ -21,6 +21,7 @@ class FakeComError(Exception):
 
 class FakeAppointment:
     Class = 26
+    RecurrenceState = 0
 
     def __init__(self, entry_id):
         self.EntryID = entry_id

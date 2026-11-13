@@ -38,6 +38,13 @@ upstream, so nothing here publishes.
   then applies a COM-level `Restrict` before Python iterates. `all_events` is capped to a
   one-year horizon (`CALENDAR_ALL_EVENTS_MAX_DAYS`), because an unbounded scan expands
   recurring series forever and blocks Outlook's single-threaded COM apartment.
+- **Occurrence ids.** Outlook gives every occurrence of a recurring meeting the series'
+  EntryID, so an EntryID alone can only address the series. Listings return
+  `<EntryID>@<start>` for an occurrence (`occurrence_id`), resolved with
+  `GetRecurrencePattern().GetOccurrence(start)`. The start is passed labelled UTC because
+  pywin32 shifts a naive datetime from local time, and Outlook reads the value as local
+  wall-clock time. Mutators refuse a series id unless `series=True`, so one occurrence is the
+  easy target and the whole series is the deliberate one. Moving an occurrence changes its id.
 - **Filters.** `Items.Restrict` speaks Jet, which has no LIKE. Filters containing LIKE are
   translated to DASL (`@SQL=`) through a verified field map in `bridge.py`.
 - **Free/busy** takes an email address directly and defaults to the current user.

@@ -31,6 +31,11 @@ Commands: `emails`, `email`, `send`, `reply`, `forward`, `mark`, `move`, `delete
 `calendar`, `edit-appt`, `delete-appt`, `freebusy`, `tasks`, `task`, `create-task`,
 `edit-task`, `delete-task`.
 
+Each event `calendar` lists has an `entry_id` that targets just that event. For a recurring
+meeting that's one occurrence (`<series id>@<start>`), and `series_id` names the whole
+series. `edit-appt`, `delete-appt` and `respond` change one occurrence by default; changing
+a whole series takes `--series`, and passing a series id without it is an error.
+
 As a library:
 
 ```python

@@ -126,7 +126,9 @@ def main() -> None:
     cal_parser = subparsers.add_parser("calendar", help="List calendar events")
     cal_parser.add_argument("--days", type=int, default=7, help="Days ahead to look")
     cal_parser.add_argument(
-        "--all", action="store_true", help="Show all events without date filtering"
+        "--all",
+        action="store_true",
+        help="Show the next 365 days (the longest window allowed)",
     )
 
     # Get email command
@@ -229,17 +231,33 @@ def main() -> None:
     get_appt_parser = subparsers.add_parser(
         "appointment", help="Get appointment details"
     )
-    get_appt_parser.add_argument("--id", required=True, help="Appointment entry ID")
+    get_appt_parser.add_argument(
+        "--id", required=True, help="Appointment or occurrence entry ID"
+    )
 
     # Delete appointment command
     del_appt_parser = subparsers.add_parser("delete-appt", help="Delete an appointment")
-    del_appt_parser.add_argument("--id", required=True, help="Appointment entry ID")
+    del_appt_parser.add_argument(
+        "--id", required=True, help="Appointment or occurrence entry ID"
+    )
+    del_appt_parser.add_argument(
+        "--series",
+        action="store_true",
+        help="Act on the whole recurring series, not one occurrence",
+    )
 
     # Respond to meeting command
     respond_parser = subparsers.add_parser(
         "respond", help="Respond to meeting invitation"
     )
-    respond_parser.add_argument("--id", required=True, help="Appointment entry ID")
+    respond_parser.add_argument(
+        "--id", required=True, help="Appointment or occurrence entry ID"
+    )
+    respond_parser.add_argument(
+        "--series",
+        action="store_true",
+        help="Act on the whole recurring series, not one occurrence",
+    )
     respond_parser.add_argument(
         "--response",
         required=True,
@@ -264,7 +282,14 @@ def main() -> None:
 
     # Edit appointment command
     edit_appt_parser = subparsers.add_parser("edit-appt", help="Edit an appointment")
-    edit_appt_parser.add_argument("--id", required=True, help="Appointment entry ID")
+    edit_appt_parser.add_argument(
+        "--id", required=True, help="Appointment or occurrence entry ID"
+    )
+    edit_appt_parser.add_argument(
+        "--series",
+        action="store_true",
+        help="Act on the whole recurring series, not one occurrence",
+    )
     edit_appt_parser.add_argument(
         "--required", help="Required attendees (comma-separated)"
     )
@@ -476,7 +501,7 @@ def run_command(bridge: OutlookBridge, args: argparse.Namespace) -> None:
         print(json.dumps(appointment, indent=2))
 
     elif args.command == "delete-appt":
-        bridge.delete_appointment(args.id)
+        bridge.delete_appointment(args.id, series=args.series)
         print(json.dumps({"status": "success", "message": "Appointment deleted"}))
 
     elif args.command == "edit-appt":
@@ -489,11 +514,12 @@ def run_command(bridge: OutlookBridge, args: argparse.Namespace) -> None:
             end=args.end,
             location=args.location,
             body=args.body,
+            series=args.series,
         )
         print(json.dumps({"status": "success", "message": "Appointment updated"}))
 
     elif args.command == "respond":
-        bridge.respond_to_meeting(args.id, args.response)
+        bridge.respond_to_meeting(args.id, args.response, series=args.series)
         outcome = {
             "accept": "accepted",
             "decline": "declined",

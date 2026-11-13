@@ -204,6 +204,7 @@ def make_appointment(start, end, subject="Test Appointment"):
     """Fake appointment item exposing the attributes _safe_get_attr reads."""
     return SimpleNamespace(
         EntryID=f"apt-{subject}-{start:%Y%m%d%H%M}",
+        RecurrenceState=0,
         Subject=subject,
         Start=start,
         End=end,

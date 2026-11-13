@@ -58,6 +58,7 @@ class FakeItem:
     """A COM item whose listed operations fail."""
 
     EntryID = "id-1"
+    RecurrenceState = 0  # not recurring
     Subject = "subject"
     Complete = False
     Status = 0
@@ -1024,7 +1025,7 @@ class TestCliExtras:
     def test_respond_message(self, run_cli, response, message):
         code, out, _ = run_cli(
             ["respond", "--id", "x", "--response", response],
-            respond_to_meeting=lambda *_a: True,
+            respond_to_meeting=lambda *_a, **_kw: True,
         )
 
         assert code == 0
