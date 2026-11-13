@@ -67,7 +67,11 @@ uv run pytest -m windows      # only the live-Outlook tests (Windows + Outlook)
 - CI (`tests.yml`, ubuntu) runs the pure-Python tests; the live-Outlook ones run only on a
   Windows machine with Outlook open.
 - Integration tests use real Outlook data, no mocking. Items they create carry a `[TEST] `
-  prefix and are cleaned up by prefix.
+  prefix and are cleaned up by prefix, in a `finally`, from whichever folder they end up
+  in (a draft moved to the Inbox is cleaned from the Inbox).
+- Each test has a 60-second timeout (`pytest.ini`). Searches that iterate items over COM
+  (`search_by_sender`) need a small `limit` and a query that matches near the top, or they
+  walk the whole folder.
 - COM is apartment-threaded: all calls happen on one thread (the session-scoped fixture), so
   don't run integration tests in parallel.
 - COM date filters are locale-specific (currently `MM/DD/YYYY HH:MM`).
