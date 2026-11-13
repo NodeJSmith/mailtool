@@ -41,10 +41,15 @@ upstream, so nothing here publishes.
 - **Occurrence ids.** Outlook gives every occurrence of a recurring meeting the series'
   EntryID, so an EntryID alone can only address the series. Listings return
   `<EntryID>@<start>` for an occurrence (`occurrence_id`), resolved with
-  `GetRecurrencePattern().GetOccurrence(start)`. The start is passed labelled UTC because
-  pywin32 shifts a naive datetime from local time, and Outlook reads the value as local
-  wall-clock time. Mutators refuse a series id unless `series=True`, so one occurrence is the
+  `GetRecurrencePattern().GetOccurrence(start)`. Mutators refuse a series id unless `series=True`, so one occurrence is the
   easy target and the whole series is the deliberate one. Moving an occurrence changes its id.
+- **Times are local wall clock, in whenever.** Outlook reads and returns appointment times
+  and due dates as local wall-clock time, so mailtool holds them as whenever `PlainDateTime`
+  and `Date` (stdlib `datetime` appears only at the COM boundary). Every value crosses that
+  boundary through `to_outlook` and `from_outlook`. pywin32 shifts a naive datetime from
+  local time to UTC on the way in, so `to_outlook` hands it the wall-clock time labelled UTC,
+  which passes through unchanged; a naive datetime written straight to COM lands off by the
+  UTC offset.
 - **Filters.** `Items.Restrict` speaks Jet, which has no LIKE. Filters containing LIKE are
   translated to DASL (`@SQL=`) through a verified field map in `bridge.py`.
 - **Free/busy** takes an email address directly and defaults to the current user.

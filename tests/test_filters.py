@@ -11,10 +11,10 @@ Unit tests for the filter fixes in bridge.py:
 These tests are pure-Python (no Outlook / pywin32 required).
 """
 
-from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from whenever import PlainDateTime
 
 import mailtool.bridge as bridge_module
 from mailtool.bridge import (
@@ -22,6 +22,9 @@ from mailtool.bridge import (
     CALENDAR_MAX_ITEMS,
     MailtoolError,
     OutlookBridge,
+    from_outlook,
+    now_wall_clock,
+    to_outlook,
     translate_filter,
 )
 
@@ -200,14 +203,23 @@ class FakeCalendar:
         self.Items = items
 
 
+def shifted(wall, **delta):
+    """`wall` moved by `delta`; DST is irrelevant to these fake calendars."""
+    return wall.add(**delta, naive_arithmetic_ok=True)
+
+
 def make_appointment(start, end, subject="Test Appointment"):
-    """Fake appointment item exposing the attributes _safe_get_attr reads."""
+    """Fake appointment item exposing the attributes _safe_get_attr reads.
+
+    `start` and `end` are wall-clock PlainDateTimes, stored as pywin32 returns
+    Outlook times.
+    """
     return SimpleNamespace(
-        EntryID=f"apt-{subject}-{start:%Y%m%d%H%M}",
+        EntryID=f"apt-{subject}-{start.format('YYYYMMDDHHmm')}",
         RecurrenceState=0,
         Subject=subject,
-        Start=start,
-        End=end,
+        Start=to_outlook(start),
+        End=to_outlook(end),
         Location="",
         Organizer="Organizer",
         AllDayEvent=False,
@@ -318,50 +330,50 @@ class TestSearchEmailsFilterHandling:
     def test_days_window_in_filter(self):
         items = FakeItems()
         bridge, _ = make_bridge_with_calendar(items)
-        before = datetime.now()
+        before = now_wall_clock()
 
         bridge.list_calendar_events(days=14)
 
         applied = items.restrict_calls[0]
-        expected_end = (before + timedelta(days=14)).strftime("%Y-%m-%d")
+        expected_end = before.add(days=14).format("YYYY-MM-DD")
         assert f"dtstart\" <= '{expected_end}" in applied
 
     def test_days_clamped_to_horizon(self):
         items = FakeItems()
         bridge, _ = make_bridge_with_calendar(items)
-        before = datetime.now()
+        before = now_wall_clock()
 
         bridge.list_calendar_events(days=99999)
 
         applied = items.restrict_calls[0]
-        expected_end = before + timedelta(days=CALENDAR_ALL_EVENTS_MAX_DAYS)
-        assert f"dtstart\" <= '{expected_end.strftime('%Y-%m-%d')}" in applied
+        expected_end = before.add(days=CALENDAR_ALL_EVENTS_MAX_DAYS)
+        assert f"dtstart\" <= '{expected_end.format('YYYY-MM-DD')}" in applied
 
     def test_all_events_uses_bounded_horizon(self):
         items = FakeItems()
         bridge, _ = make_bridge_with_calendar(items)
-        before = datetime.now()
+        before = now_wall_clock()
 
         bridge.list_calendar_events(all_events=True)
 
         applied = items.restrict_calls[0]
-        expected_end = before + timedelta(days=CALENDAR_ALL_EVENTS_MAX_DAYS)
-        assert f"dtstart\" <= '{expected_end.strftime('%Y-%m-%d')}" in applied
+        expected_end = before.add(days=CALENDAR_ALL_EVENTS_MAX_DAYS)
+        assert f"dtstart\" <= '{expected_end.format('YYYY-MM-DD')}" in applied
 
     def test_overlapping_events_returned_outside_filtered(self):
-        now = datetime.now()
+        now = now_wall_clock()
         in_window = make_appointment(
-            now + timedelta(days=1), now + timedelta(days=1, hours=1), "In Window"
+            shifted(now, days=1), shifted(now, days=1, hours=1), "In Window"
         )
         past = make_appointment(
-            now - timedelta(days=10), now - timedelta(days=10, hours=-1), "Past"
+            shifted(now, days=-10), shifted(now, days=-10, hours=1), "Past"
         )
         future = make_appointment(
-            now + timedelta(days=100), now + timedelta(days=100, hours=1), "Far Future"
+            shifted(now, days=100), shifted(now, days=100, hours=1), "Far Future"
         )
         # Overlapping event that STARTS before the window but ends inside it
         overlapping = make_appointment(
-            now - timedelta(hours=2), now + timedelta(hours=2), "Overlap"
+            shifted(now, hours=-2), shifted(now, hours=2), "Overlap"
         )
         items = FakeItems([in_window, past, future, overlapping])
         bridge, _ = make_bridge_with_calendar(items)
@@ -375,11 +387,11 @@ class TestSearchEmailsFilterHandling:
         assert "Far Future" not in subjects
 
     def test_iteration_cap_respected(self, monkeypatch):
-        now = datetime.now()
+        now = now_wall_clock()
         many = [
             make_appointment(
-                now + timedelta(days=1, minutes=i * 30),
-                now + timedelta(days=1, minutes=i * 30 + 15),
+                shifted(now, days=1, minutes=i * 30),
+                shifted(now, days=1, minutes=i * 30 + 15),
                 f"Capped {i}",
             )
             for i in range(10)
@@ -394,25 +406,29 @@ class TestSearchEmailsFilterHandling:
 
 
 class TestHelpers:
-    def test_to_naive_datetime_with_python_datetime(self):
-        dt = datetime(2026, 8, 18, 12, 30, 45)
-        assert OutlookBridge._to_naive_datetime(dt) == dt
+    def test_outlook_round_trip_keeps_wall_clock(self):
+        wall = PlainDateTime(2026, 8, 18, 12, 30, 45)
+        assert from_outlook(to_outlook(wall)) == wall
 
-    def test_to_naive_datetime_with_com_style_object(self):
+    def test_to_outlook_labels_wall_clock_as_utc(self):
+        """pywin32 then passes the wall-clock components through unchanged."""
+        com = to_outlook(PlainDateTime(2026, 8, 18, 12, 30, 45))
+        assert com.hour == 12
+        assert str(com.utcoffset()) == "0:00:00"
+
+    def test_from_outlook_with_com_style_object(self):
         com_dt = SimpleNamespace(
             Year=2026, Month=8, Day=18, Hour=12, Minute=30, Second=45
         )
-        assert OutlookBridge._to_naive_datetime(com_dt) == datetime(
-            2026, 8, 18, 12, 30, 45
-        )
+        assert from_outlook(com_dt) == PlainDateTime(2026, 8, 18, 12, 30, 45)
 
-    def test_to_naive_datetime_garbage_returns_none(self):
-        assert OutlookBridge._to_naive_datetime("not a date") is None
-        assert OutlookBridge._to_naive_datetime(None) is None
+    def test_from_outlook_garbage_returns_none(self):
+        assert from_outlook("not a date") is None
+        assert from_outlook(None) is None
 
     def test_calendar_range_filter_format(self):
-        start = datetime(2026, 8, 18, 0, 0)
-        end = datetime(2026, 9, 1, 0, 0)
+        start = PlainDateTime(2026, 8, 18, 0, 0)
+        end = PlainDateTime(2026, 9, 1, 0, 0)
         flt = OutlookBridge._calendar_range_filter(start, end)
         assert flt == (
             '@SQL=("http://schemas.microsoft.com/mapi/proptag/0x001A001F" '
@@ -433,8 +449,8 @@ class TestMeetingStatusLabels:
 
     @pytest.mark.parametrize(("raw", "label"), MEETING_STATUS_CASES)
     def test_list_calendar_events(self, raw, label):
-        now = datetime.now()
-        item = make_appointment(now + timedelta(hours=1), now + timedelta(hours=2))
+        now = now_wall_clock()
+        item = make_appointment(shifted(now, hours=1), shifted(now, hours=2))
         item.MeetingStatus = raw
         bridge, _ = make_bridge_with_calendar(FakeItems([item]))
 
@@ -444,8 +460,8 @@ class TestMeetingStatusLabels:
 
     @pytest.mark.parametrize(("raw", "label"), MEETING_STATUS_CASES)
     def test_get_appointment(self, raw, label):
-        now = datetime.now()
-        item = make_appointment(now, now + timedelta(hours=1))
+        now = now_wall_clock()
+        item = make_appointment(now, shifted(now, hours=1))
         item.MeetingStatus = raw
         item.Body = ""
         bridge = OutlookBridge.__new__(OutlookBridge)  # skip COM __init__

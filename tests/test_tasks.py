@@ -4,11 +4,11 @@ Task functionality tests.
 Tests for listing, creating, and managing Outlook tasks.
 """
 
-from datetime import datetime, timedelta
-
 import pytest
 
-from .conftest import TEST_PREFIX, assert_valid_entry_id
+from mailtool.bridge import DATE_PATTERN
+
+from .conftest import TEST_PREFIX, assert_valid_entry_id, from_now
 
 
 @pytest.mark.integration
@@ -71,7 +71,7 @@ class TestTasks:
     def test_create_task_with_due_date(self, bridge, test_timestamp, cleanup_helpers):
         """Test creating a task with a due date"""
         subject = f"{TEST_PREFIX}Due Date Test {test_timestamp}"
-        due_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+        due_date = from_now(days=7).date().format(DATE_PATTERN)
 
         entry_id = bridge.create_task(
             subject=subject, body="Task with due date", due_date=due_date
@@ -96,7 +96,7 @@ class TestTasks:
 
             entry_id = bridge.create_task(
                 subject=subject,
-                due_date=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
+                due_date=from_now(days=1).date().format(DATE_PATTERN),
                 importance=priority,
             )
 
@@ -175,11 +175,11 @@ class TestTasks:
         """Test editing a task's due date"""
         # Create task
         subject = f"{TEST_PREFIX}Edit Due Date Test {test_timestamp}"
-        original_due = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
+        original_due = from_now(days=5).date().format(DATE_PATTERN)
         entry_id = bridge.create_task(subject=subject, due_date=original_due)
 
         # Edit due date
-        new_due = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
+        new_due = from_now(days=14).date().format(DATE_PATTERN)
         result = bridge.edit_task(entry_id, due_date=new_due)
 
         assert result is True

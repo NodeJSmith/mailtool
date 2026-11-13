@@ -4,13 +4,25 @@ Calendar functionality tests.
 Tests for listing, creating, and managing calendar appointments.
 """
 
-from datetime import datetime, timedelta
-
 import pytest
+from whenever import Time
 
-from mailtool.bridge import MailtoolError
+from mailtool.bridge import (
+    DATE_PATTERN,
+    WALL_CLOCK_PATTERN,
+    MailtoolError,
+    now_wall_clock,
+    parse_wall_clock,
+    to_outlook,
+)
 
-from .conftest import TEST_PREFIX, assert_calendar_structure, assert_valid_entry_id
+from .conftest import (
+    TEST_PREFIX,
+    assert_calendar_structure,
+    assert_valid_entry_id,
+    from_now,
+    shifted,
+)
 
 # Meetings in the daily_series fixture.
 OCCURRENCES = 4
@@ -51,13 +63,13 @@ class TestCalendar:
         """Test creating a basic appointment"""
         subject = f"{TEST_PREFIX}Appt Test {test_timestamp}"
 
-        start = datetime.now() + timedelta(hours=1)
-        end = start + timedelta(minutes=30)
+        start = from_now(hours=1)
+        end = shifted(start, minutes=30)
 
         entry_id = bridge.create_appointment(
             subject=subject,
-            start=start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=end.strftime("%Y-%m-%d %H:%M:%S"),
+            start=start.format(WALL_CLOCK_PATTERN),
+            end=end.format(WALL_CLOCK_PATTERN),
         )
 
         assert_valid_entry_id(entry_id)
@@ -77,13 +89,13 @@ class TestCalendar:
         subject = f"{TEST_PREFIX}Location Test {test_timestamp}"
         location = "Conference Room B"
 
-        start = datetime.now() + timedelta(hours=2)
-        end = start + timedelta(hours=1)
+        start = from_now(hours=2)
+        end = shifted(start, hours=1)
 
         entry_id = bridge.create_appointment(
             subject=subject,
-            start=start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=end.strftime("%Y-%m-%d %H:%M:%S"),
+            start=start.format(WALL_CLOCK_PATTERN),
+            end=end.format(WALL_CLOCK_PATTERN),
             location=location,
         )
 
@@ -104,13 +116,13 @@ class TestCalendar:
         subject = f"{TEST_PREFIX}Body Test {test_timestamp}"
         body = f"Agenda:\n1. Review project status\n2. Discuss timeline\n3. Action items\n\nTest ID: {test_timestamp}"
 
-        start = datetime.now() + timedelta(hours=3)
-        end = start + timedelta(minutes=45)
+        start = from_now(hours=3)
+        end = shifted(start, minutes=45)
 
         entry_id = bridge.create_appointment(
             subject=subject,
-            start=start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=end.strftime("%Y-%m-%d %H:%M:%S"),
+            start=start.format(WALL_CLOCK_PATTERN),
+            end=end.format(WALL_CLOCK_PATTERN),
             body=body,
         )
 
@@ -129,14 +141,13 @@ class TestCalendar:
         subject = f"{TEST_PREFIX}All Day Test {test_timestamp}"
 
         # For all-day events, start and end should be dates (no time)
-        start = datetime.now() + timedelta(days=1)
-        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
+        start = now_wall_clock().date().add(days=1).at(Time())
+        end = shifted(start, days=1)
 
         entry_id = bridge.create_appointment(
             subject=subject,
-            start=start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=end.strftime("%Y-%m-%d %H:%M:%S"),
+            start=start.format(WALL_CLOCK_PATTERN),
+            end=end.format(WALL_CLOCK_PATTERN),
             all_day=True,
         )
 
@@ -156,13 +167,13 @@ class TestCalendar:
         """Test creating an appointment with attendees"""
         subject = f"{TEST_PREFIX}Attendees Test {test_timestamp}"
 
-        start = datetime.now() + timedelta(days=2)
-        end = start + timedelta(hours=1)
+        start = from_now(days=2)
+        end = shifted(start, hours=1)
 
         entry_id = bridge.create_appointment(
             subject=subject,
-            start=start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=end.strftime("%Y-%m-%d %H:%M:%S"),
+            start=start.format(WALL_CLOCK_PATTERN),
+            end=end.format(WALL_CLOCK_PATTERN),
             required_attendees="required1@example.com; required2@example.com",
             optional_attendees="optional1@example.com",
         )
@@ -209,13 +220,13 @@ class TestCalendar:
         """Test editing an existing appointment"""
         # Create appointment
         subject = f"{TEST_PREFIX}Edit Test {test_timestamp}"
-        start = datetime.now() + timedelta(days=3)
-        end = start + timedelta(hours=1)
+        start = from_now(days=3)
+        end = shifted(start, hours=1)
 
         entry_id = bridge.create_appointment(
             subject=subject,
-            start=start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=end.strftime("%Y-%m-%d %H:%M:%S"),
+            start=start.format(WALL_CLOCK_PATTERN),
+            end=end.format(WALL_CLOCK_PATTERN),
             location="Original Location",
         )
 
@@ -236,13 +247,13 @@ class TestCalendar:
         """Test deleting an appointment"""
         # Create appointment
         subject = f"{TEST_PREFIX}Delete Test {test_timestamp}"
-        start = datetime.now() + timedelta(days=4)
-        end = start + timedelta(hours=1)
+        start = from_now(days=4)
+        end = shifted(start, hours=1)
 
         entry_id = bridge.create_appointment(
             subject=subject,
-            start=start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=end.strftime("%Y-%m-%d %H:%M:%S"),
+            start=start.format(WALL_CLOCK_PATTERN),
+            end=end.format(WALL_CLOCK_PATTERN),
         )
 
         # Verify it exists
@@ -305,21 +316,21 @@ def daily_series(bridge, test_timestamp):
     Yields (series_id, subject); deletes the whole series afterwards.
     """
     subject = f"{TEST_PREFIX}Series {test_timestamp}"
-    start = (datetime.now() + timedelta(days=1)).replace(
-        hour=6, minute=0, second=0, microsecond=0
-    )
+    start = now_wall_clock().date().add(days=1).at(Time(6))
     appt = bridge.get_calendar().Items.Add()
     appt.Subject = subject
-    appt.Start = start
-    appt.End = start + timedelta(minutes=15)
+    appt.Start = to_outlook(start)
+    appt.End = to_outlook(shifted(start, minutes=15))
     pattern = appt.GetRecurrencePattern()
     pattern.RecurrenceType = 0  # olRecurDaily
     pattern.Occurrences = OCCURRENCES
     appt.Save()
     series_id = appt.EntryID
     yield series_id, subject
+    # A test may already have deleted the series, which moves it to Deleted
+    # Items where a second Delete fails, so only delete it from the calendar.
     item = bridge.get_item_by_id(series_id)
-    if item is not None:
+    if item is not None and item.Parent.EntryID == bridge.get_calendar().EntryID:
         item.Delete()
 
 
@@ -368,14 +379,12 @@ class TestRecurringOccurrences:
     def test_moved_occurrence_is_found_by_its_new_id(self, bridge, daily_series):
         _, subject = daily_series
         second = listed(bridge, subject)[1]
-        moved_start = datetime.strptime(
-            second["start"], "%Y-%m-%d %H:%M:%S"
-        ) + timedelta(hours=2)
+        moved_start = shifted(parse_wall_clock(second["start"]), hours=2)
 
         bridge.edit_appointment(
             second["entry_id"],
-            start=moved_start.strftime("%Y-%m-%d %H:%M:%S"),
-            end=(moved_start + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S"),
+            start=moved_start.format(WALL_CLOCK_PATTERN),
+            end=shifted(moved_start, minutes=15).format(WALL_CLOCK_PATTERN),
         )
 
         new_ids = {e["entry_id"] for e in listed(bridge, subject)}
@@ -427,7 +436,7 @@ class TestWallClockTimes:
     END = "07:30:00"
 
     def tomorrow_at(self, wall_time):
-        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        tomorrow = from_now(days=1).date().format(DATE_PATTERN)
         return f"{tomorrow} {wall_time}"
 
     def test_create_keeps_the_requested_time(
